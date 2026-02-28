@@ -1,0 +1,6 @@
+pip install vpython numpy scipy numpy-stl
+
+vpython -> Uso del navegador para GUI
+numpy -> Operaciones matematicas (DH y algoritmo lineal)
+scipy -> Calculo de cuaterniones
+numpy-stl -> Cargar modelos STL
