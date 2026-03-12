@@ -7,14 +7,13 @@ class GUI:
         title="Digital Twin ABB IRB 140",
         width=vp.canvas.get_selected().width, 
         height=vp.canvas.get_selected().height,
-        background=vp.color.gray(0.04), # Casi negro para que combine con #0a0e14
+        background=vp.color.gray(0.04), 
         align='left'
     )
     vp.box(color=vp.color.cyan) # Deberías ver un cubo cian
 
-    self.scene.append_to_caption("<h1 style='color:white;'>CONEXIÓN EXITOSA</h1>")
     self.scene.append_to_caption(self.get_links_html())
-    # links = self.get_links_html()
+
     header = self.get_header("ABB IRB 140")
     body = self.get_body()
 
@@ -26,10 +25,8 @@ class GUI:
       """
         <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
         <style>
-            /* Reset total del contenedor de VPython */
             body { margin: 0; padding: 0; overflow: hidden; background-color: #0a0e14; }
             
-            /* Seleccionamos el contenedor que VPython crea automáticamente */
             .vis-container, .glowscript { 
                 display: block !important;
                 margin: 0 !important;
@@ -40,15 +37,15 @@ class GUI:
                 top: 0;
                 left: 0;
                 z-index: 1000;
-                pointer-events: none; /* Permite rotar el robot al hacer clic en el vacío */
+                pointer-events: none; 
             }
             
             header, .panel-interactivo { 
-                pointer-events: auto; /* Reactiva clics en los menús */
+                pointer-events: auto; 
             }
 
             header {
-              white-space: pre-line;
+              white-space: normal;
               position: fixed;
               width: 100%;
               top: 0;
