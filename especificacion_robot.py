@@ -5,12 +5,12 @@ ROBOTS = {
         "grados_libertad": 6,
         "tabla_dh": [
             # [theta, d, a, alpha] -> Valores en mm y grados
-            [0, 352, 70, -90],  # Eje 1
-            [-90, 0, 360, 0],   # Eje 2
-            [0, 0, 0, -90],     # Eje 3
-            [0, 380, 0, 90],    # Eje 4
-            [0, 0, 0, -90],     # Eje 5
-            [0, 65, 0, 0]       # Eje 6
+            [0, 352, 0, 0],    # Eje 1
+            [0, 0, 280, 0],      # Eje 2
+            [0, 0, 70, -90],     # Eje 3
+            [0, 380, 0, 90],     # Eje 4
+            [0, 0, 0, -90],      # Eje 5
+            [0, 65, 0, 0]        # Eje 6
         ],
         "limites_articulares": [
             [-180, 180], # Eje 1
