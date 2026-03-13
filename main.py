@@ -16,6 +16,7 @@ def main():
   while True:
     # 60 FPS de actualizacion
     vp.rate(60)
+    gui.update()
 
 
 if __name__ == "__main__":
