@@ -1,101 +1,84 @@
 import numpy as np
-
 import math
 
-def apply_axis_angle(vec, axis, angle):
-    v = np.array(vec)
-    k = np.array(axis)
-    return v * math.cos(angle) + np.cross(k, v) * math.sin(angle) + k * np.dot(k, v) * (1 - math.cos(angle))
+def matriz_dh(theta, d, a, alpha):
+    """
+    Calcula la Matriz de Transformación Homogénea 4x4 según la convención Denavit-Hartenberg.
+    """
+    ct = np.cos(theta)
+    st = np.sin(theta)
+    ca = np.cos(alpha)
+    sa = np.sin(alpha)
+    
+    return np.array([
+        [ct, -st*ca,  st*sa, a*ct],
+        [st,  ct*ca, -ct*sa, a*st],
+        [ 0,     sa,     ca,    d],
+        [ 0,      0,      0,    1]
+    ])
 
-def cinematica_directa(angulos, tabla_dh):
+def cinematica_directa(angulos, tabla_dh=None):
     """
-    Sustituida la tabla DH clásica por el motor cinemático equivalente a la realidad 
-    visual de Three.js, de esta forma la telemetría coincide 100% con la imagen 3D.
+    Calcula la Cinemática Directa exacta del ABB IRB 140 usando parámetros DH.
+    El origen (0,0,0) es el centro real de la base del robot.
+    
+    Args:
+        angulos: Lista de 6 ángulos en grados [J1, J2, J3, J4, J5, J6]
+    Returns:
+        T06: Matriz de transformación 4x4 final (Efector / TCP)
+        transforms: Lista de las 6 matrices intermedias (para debug o dibujar eslabones)
     """
-    DX = 247.0
-    DY = 203.0
+    # Convertir a radianes
+    q = np.radians(angulos)
+    pi_2 = np.pi / 2.0
     
-    pivots = [
-        np.array([0.0, 0.0, 0.0]),
-        np.array([DX + 65.0, DY, 0.0]),
-        np.array([DX + 140.0, DY, 352.0]),
-        np.array([DX + 140.0, DY, 712.0]),
-        np.array([DX + 70.0, DY, 712.0]),
-        np.array([DX + 520.0, DY, 712.0]),
-        np.array([DX + 515.0, DY, 712.0])
-    ]
+    # --- PARÁMETROS DH OFICIALES DEL IRB 140 ---
+    # Valores: [theta, d (Z), a (X), alpha (Torsión X)]
+    # Nota: J2 tiene un offset de -90° para que coincida con el "Home" vertical de RobotStudio
     
-    axes = [
-        np.array([0, 0, 0]),
-        np.array([0, 0, 1]),
-        np.array([0, 1, 0]),
-        np.array([0, 1, 0]),
-        np.array([1, 0, 0]),
-        np.array([0, 1, 0]),
-        np.array([1, 0, 0])
-    ]
+    T1 = matriz_dh(q[0],          352.0,  70.0, -pi_2)
+    T2 = matriz_dh(q[1] - pi_2,     0.0, 360.0,   0.0)
+    T3 = matriz_dh(q[2],            0.0,   0.0, -pi_2)
+    T4 = matriz_dh(q[3],          380.0,   0.0,  pi_2)
+    T5 = matriz_dh(q[4],            0.0,   0.0, -pi_2)
+    T6 = matriz_dh(q[5],           65.0,   0.0,   0.0)
     
-    wrist_axes = [
-        np.array([1.0, 0, 0]), 
-        np.array([0, 1.0, 0]), 
-        np.array([1.0, 0, 0])  
-    ]
+    # Multiplicación secuencial de la cadena cinemática (Acumulación de rotaciones y traslaciones)
+    T01 = T1
+    T02 = T01 @ T2
+    T03 = T02 @ T3
+    T04 = T03 @ T4
+    T05 = T04 @ T5
+    T06 = T05 @ T6  # Posición y orientación final del TCP
     
-    q_rad = [math.radians(deg) for deg in angulos]
-    transformaciones = []
-    
-    for j in range(1, 7):
-        ang = q_rad[j - 1]
-            
-        origin = pivots[j]
-        axis = axes[j]
-        
-        for p_idx in range(j + 1, 7):
-            offset = pivots[p_idx] - origin
-            pivots[p_idx] = origin + apply_axis_angle(offset, axis, ang)
-            axes[p_idx] = apply_axis_angle(axes[p_idx], axis, ang)
-            
-        if j >= 4:
-            idx_w = j - 4
-            for w in range(idx_w, 3):
-                wrist_axes[w] = apply_axis_angle(wrist_axes[w], axis, ang)
-                
-    tcpOffset = 65.0
-    tcpPosition = pivots[6] + axes[6] * tcpOffset
-    
-    X_local = axes[6]
-    Y_local = wrist_axes[1]
-    Z_local = np.cross(X_local, Y_local)
-    
-    R = np.column_stack([X_local, Y_local, Z_local])
-    
-    T_final = np.eye(4)
-    T_final[:3, :3] = R
-    
-    # Restamos las coordenadas de alineación ficticia base para la telemetría real
-    T_final[0, 3] = tcpPosition[0] - DX
-    T_final[1, 3] = tcpPosition[1] - DY
-    T_final[2, 3] = tcpPosition[2]
-    
-    return T_final, [np.eye(4)] * 6
+    # Retornamos la matriz final y el historial de transformaciones
+    return T06, [T01, T02, T03, T04, T05, T06]
 
 
 def obtener_posicion_efector(T):
+    """
+    Extrae la posición y rotación de una matriz homogénea 4x4.
+    """
     posicion = T[:3, 3]
     rotacion = T[:3, :3]
     
+    # Redondeo a 3 decimales para evitar ruido de punto flotante en la API (ej. 1.000000000001e-16)
     return {
-        "posicion": posicion.tolist(),
-        "matriz_rotacion": rotacion.tolist(),
-        "x": float(posicion[0]),
-        "y": float(posicion[1]),
-        "z": float(posicion[2])
+        "posicion": np.round(posicion, 3).tolist(),
+        "matriz_rotacion": np.round(rotacion, 5).tolist(),
+        "x": round(float(posicion[0]), 3),
+        "y": round(float(posicion[1]), 3),
+        "z": round(float(posicion[2]), 3)
     }
 
 
 def matriz_a_euler(R):
+    """
+    Convierte una matriz de rotación 3x3 a ángulos de Euler (Roll, Pitch, Yaw).
+    """
     sy = np.sqrt(R[0, 0]**2 + R[1, 0]**2)
     
+    # Singularidad (Gimbal Lock) cuando Pitch es +/- 90 grados
     if sy > 1e-6:
         roll = np.arctan2(R[2, 1], R[2, 2])
         pitch = np.arctan2(-R[2, 0], sy)
@@ -109,6 +92,10 @@ def matriz_a_euler(R):
 
 
 def matriz_a_cuaternion(R):
+    """
+    Convierte una matriz de rotación 3x3 a Cuaternión.
+    Formato de salida: (w, x, y, z) -> w es la parte real (q1 en RobotStudio)
+    """
     trace = np.trace(R)
     
     if trace > 0:
@@ -137,4 +124,6 @@ def matriz_a_cuaternion(R):
         z = 0.25 * s
     
     norm = np.sqrt(w**2 + x**2 + y**2 + z**2)
-    return (w/norm, x/norm, y/norm, z/norm)
+    
+    # Redondeo para sanear la salida JSON hacia el frontend
+    return (round(w/norm, 5), round(x/norm, 5), round(y/norm, 5), round(z/norm, 5))

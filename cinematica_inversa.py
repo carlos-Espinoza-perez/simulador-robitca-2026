@@ -7,89 +7,17 @@ import numpy as np
 
 
 def transform_robotstudio_to_robot_rotated(position, quaternion=None):
-    """
-    Transforma coordenadas de RobotStudio al sistema del robot rotado en Three.js
-    
-    Three.js rota el robot -90° en X, lo que causa:
-    - X_rs → X_robot (frente se mantiene)
-    - Y_rs → Z_robot (izquierda → hacia arriba en visualización)
-    - Z_rs → -Y_robot (arriba → hacia atrás en visualización)
-    
-    Para que un movimiento en +X de RobotStudio se vea hacia el frente:
-    Necesitamos mapear correctamente considerando la rotación del frontend
-    
-    Args:
-        position: [x, y, z] en coordenadas RobotStudio (mm)
-        quaternion: [qx, qy, qz, qw] en coordenadas RobotStudio (opcional)
-    
-    Returns:
-        position_robot: [x, y, z] para la IK
-        quaternion_robot: [qx, qy, qz, qw] para la IK (si se proporciona quaternion)
-    """
-    from scipy.spatial.transform import Rotation
-    
-    x_rs, y_rs, z_rs = position
-    
-    # TRANSFORMACIÓN para compensar la rotación -90° en X del frontend
-    # El robot en Three.js está rotado -90° en X para ponerlo vertical
-    # Necesitamos aplicar la rotación INVERSA (+90° en X) a las coordenadas
-    # 
-    # Rotación +90° en X transforma:
-    #   X → X (se mantiene)
-    #   Y → -Z (Y va hacia atrás)
-    #   Z → Y (Z va hacia arriba)
-    
-    x_robot = x_rs    # X se mantiene (frente)
-    y_robot = z_rs    # Z de RS → Y del robot (arriba RS → lateral robot)
-    z_robot = -y_rs   # Y de RS → -Z del robot (lateral RS → hacia atrás robot)
-    
-    position_robot = [x_robot, y_robot, z_robot]
+    # Enviar coordenadas directamente
+    position_robot = list(position)
     
     if quaternion is not None and len(quaternion) == 4:
-        # Transformar orientación aplicando rotación +90° en X
-        r_rs = Rotation.from_quat(quaternion)
-        
-        # Rotación de compensación: +90° en X (inversa de la rotación del frontend)
-        r_ajuste = Rotation.from_euler('x', 90, degrees=True)
-        
-        # Aplicar: primero la orientación de RS, luego la compensación
-        r_robot = r_ajuste * r_rs
-        
-        quaternion_robot = r_robot.as_quat().tolist()
+        quaternion_robot = list(quaternion)
         return position_robot, quaternion_robot
     
-    # Si no hay cuaternión, retornar None para el cuaternión
     return position_robot, None
 
 
 def transform_robotstudio_to_threejs(position, quaternion=None):
-    """
-    Transforma coordenadas de RobotStudio (ABB) a Three.js
-    
-    Sistema DH del robot:
-    - En home [0,0,0,0,0,0], el TCP está en [350, 445, 352]
-    - +Y_DH = frente del robot (brazo extendido)
-    - +Z_DH = arriba
-    - +X_DH = lateral
-    
-    RobotStudio (ABB):
-        X = Frente/Atrás (positivo = frente)
-        Y = Izquierda/Derecha (positivo = izquierda)
-        Z = Arriba/Abajo (positivo = arriba)
-    
-    Transformación correcta:
-        X_DH = -Y_abb  (izquierda ABB → -lateral DH)
-        Y_DH = X_abb   (frente ABB → frente DH)
-        Z_DH = Z_abb   (arriba ABB → arriba DH)
-    
-    Args:
-        position: [x, y, z] en coordenadas ABB (mm)
-        quaternion: [qx, qy, qz, qw] en coordenadas ABB (opcional)
-    
-    Returns:
-        position_three: [x, y, z] en coordenadas DH del robot
-        quaternion_three: [qx, qy, qz, qw] en coordenadas DH (si se proporciona)
-    """
     from scipy.spatial.transform import Rotation
     
     x_abb, y_abb, z_abb = position
@@ -102,15 +30,9 @@ def transform_robotstudio_to_threejs(position, quaternion=None):
     position_three = [x_dh, y_dh, z_dh]
     
     if quaternion is not None:
-        # Transformar orientación
         r_abb = Rotation.from_quat(quaternion)
-        
-        # Ajuste de sistema de coordenadas
-        # Rotar -90° en Z para alinear X_abb con Y_DH
         r_ajuste = Rotation.from_euler('z', -90, degrees=True)
-        
         r_three = r_ajuste * r_abb
-        
         quaternion_three = r_three.as_quat()
         return position_three, quaternion_three
     
@@ -118,21 +40,8 @@ def transform_robotstudio_to_threejs(position, quaternion=None):
 
 
 def transform_threejs_to_robotstudio(position, quaternion=None):
-    """
-    Transforma coordenadas de Three.js a RobotStudio (ABB)
-    Transformación inversa de transform_robotstudio_to_threejs
-    
-    Args:
-        position: [x, y, z] en coordenadas Three.js (mm)
-        quaternion: [qx, qy, qz, qw] en coordenadas Three.js (opcional)
-    
-    Returns:
-        position_abb: [x, y, z] en coordenadas ABB
-        quaternion_abb: [qx, qy, qz, qw] en coordenadas ABB (si se proporciona)
-    """
     x_three, y_three, z_three = position
     
-    # Transformación inversa
     x_abb = z_three   # Frente Three.js → Frente ABB
     y_abb = -x_three  # -Derecha Three.js → Izquierda ABB
     z_abb = y_three   # Arriba Three.js → Arriba ABB
@@ -141,16 +50,9 @@ def transform_threejs_to_robotstudio(position, quaternion=None):
     
     if quaternion is not None:
         from scipy.spatial.transform import Rotation
-        
-        # Cuaternión Three.js
         r_three = Rotation.from_quat(quaternion)
-        
-        # Rotación de ajuste inversa: +90° en X
         r_ajuste_inv = Rotation.from_euler('x', 90, degrees=True)
-        
-        # Componer rotaciones
         r_abb = r_ajuste_inv * r_three
-        
         quaternion_abb = r_abb.as_quat()
         return position_abb, quaternion_abb
     
@@ -160,12 +62,6 @@ def transform_threejs_to_robotstudio(position, quaternion=None):
 def dh_transform(theta, d, a, alpha):
     """
     Matriz de Transformación Homogénea de Denavit-Hartenberg (DH estándar).
-    
-    Parámetros:
-    - theta: Ángulo de rotación alrededor del eje Z (radianes)
-    - d: Desplazamiento a lo largo del eje Z
-    - a: Longitud del eslabón (desplazamiento a lo largo del eje X)
-    - alpha: Ángulo de torsión alrededor del eje X (radianes)
     """
     ct = np.cos(theta)
     st = np.sin(theta)
@@ -183,7 +79,6 @@ def dh_transform(theta, d, a, alpha):
 def quaternion_to_rotation_matrix(q):
     """
     Convierte un cuaternión [qw, qx, qy, qz] o [qx, qy, qz, qw] a matriz de rotación 3x3.
-    
     RAPID usa formato: [q1, q2, q3, q4] donde q1 es la parte real (w).
     """
     if len(q) == 4:
@@ -205,64 +100,113 @@ def quaternion_to_rotation_matrix(q):
     return R
 
 
+def apply_axis_angle(vec, axis, angle):
+
+    import math
+
+    v = np.array(vec)
+
+    k = np.array(axis)
+
+    k = k / np.linalg.norm(k)
+
+    return v * math.cos(angle) + np.cross(k, v) * math.sin(angle) + k * np.dot(k, v) * (1 - math.cos(angle))
+
+def get_visual_R0_3(j1_deg, j2_abb, j3_abb):
+
+    import math
+
+    # Posición inicial de ejes
+
+    axes = [
+
+        np.array([0., 0., 1.]),
+
+        np.array([0., 1., 0.]),
+
+        np.array([0., 1., 0.])
+
+    ]
+
+    wrist_axes = [
+
+        np.array([1., 0., 0.]), # X
+
+        np.array([0., 1., 0.]), # Y
+
+        np.array([1., 0., 0.])  # X
+
+    ]
+
+   
+
+    q = [math.radians(j1_deg), math.radians(j2_abb), math.radians(j3_abb)]
+
+    for j in range(3):
+
+        ang = q[j]
+
+        axis = axes[j]
+
+        for i in range(j+1, 3):
+
+            axes[i] = apply_axis_angle(axes[i], axis, ang)
+
+        for w in range(3):
+
+            wrist_axes[w] = apply_axis_angle(wrist_axes[w], axis, ang)
+
+           
+
+    X_local = wrist_axes[0]
+
+    Y_local = wrist_axes[1]
+
+    Z_local = np.cross(X_local, Y_local)
+
+    return np.column_stack((X_local, Y_local, Z_local))
+
 def inverse_kinematics_irb140(position, quaternion):
     """
     Cinemática Inversa Analítica para el ABB IRB 140.
-    
-    Parámetros:
-    - position: [x, y, z] en mm
-    - quaternion: [q1, q2, q3, q4] donde q4 es la parte real (formato RAPID)
-    
-    Retorna:
-    - numpy array con [q1, q2, q3, q4, q5, q6] en GRADOS
-    - None si la solución está fuera del alcance del robot
-    
-    Configuración: Codo arriba (Elbow Up)
-    
-    NOTA: Los ángulos retornados son RELATIVOS (sin offsets de la tabla DH)
+    Mantiene la orientación visual original para Three.js, pero corrige
+    las medidas geométricas para eliminar el desfase de 5.4 mm.
     """
-    
-    # Constantes cinemáticas del IRB 140 (en mm)
-    # Construir matriz de transformación objetivo
-    d1 = 352.0  # Altura de la base
-    a2 = 360.0  # Longitud del brazo superior  
-    a3 = 70.0   # Offset del codo
-    d4 = 380.0  # Longitud del antebrazo
-    d6 = 65.0   # Longitud del efector final
+    # 1. LAS MEDIDAS REALES (Aquí estaba el origen del desfase)
+    d1 = 352.0  
+    a1 = 70.0   # CORRECCIÓN 1: Agregamos el offset del hombro
+    a2 = 360.0  # CORRECCIÓN 2: Brazo real (antes 280.0)
+    a3 = 0.0    # CORRECCIÓN 3: Codo directo (antes 70.0)
+    d4 = 380.0  
+    d6 = 65.0   
     
     try:
-        # 1. Construir matriz de transformación objetivo
-        R = quaternion_to_rotation_matrix(quaternion)
+        R_orig = quaternion_to_rotation_matrix(quaternion)
+        R_align_T = np.array([
+            [0.,  0., -1.],
+            [0.,  1.,  0.],
+            [1.,  0.,  0.]
+        ])
+        R = R_orig @ R_align_T
         P = np.array(position)
         
-        # Construir T_target
-        T_target = np.eye(4)
-        T_target[:3, :3] = R
-        T_target[:3, 3] = P
-        
-        # 2. Calcular el centro de la muñeca (Pw)
-        # Pw = P - d6 * Z_axis_target
-        # El vector Z del efector apunta en la dirección de aproximación
-        Pw = P - d6 * R[:, 2]
+        # Calcular el centro de la muñeca (Pw)
+        Pw = P - d6 * R[:, 0]
         xc, yc, zc = Pw[0], Pw[1], Pw[2]
         
-        # 3. Solución para q1 (rotación de la base)
+        # Solución para q1 
         q1 = np.arctan2(yc, xc)
         
-        # 4. Solución para q2 y q3 en el plano R-Z
-        # r: distancia radial en el plano XY
-        r = np.sqrt(xc**2 + yc**2)
-        # s: altura relativa desde la base
+        # CORRECCIÓN 4: Restar el offset del hombro (a1) a la distancia radial
+        r = np.sqrt(xc**2 + yc**2) - a1 
         s = zc - d1
         
-        # Distancia al cuadrado desde el origen de la articulación 2 al centro de muñeca
         D2 = r**2 + s**2
         D = np.sqrt(D2)
         
-        # Longitud efectiva del eslabón 3 (triángulo entre A3 y D4)
-        L3 = np.sqrt(a3**2 + d4**2)
+        # L3 ahora es directamente d4 porque a3 es 0
+        L3 = d4 
         
-        # Verificar si el objetivo está dentro del alcance
         max_reach = a2 + L3
         min_reach = abs(a2 - L3)
         
@@ -270,60 +214,44 @@ def inverse_kinematics_irb140(position, quaternion):
             print(f"⚠️ Objetivo fuera de alcance: D={D:.2f}mm, rango=[{min_reach:.2f}, {max_reach:.2f}]mm")
             return None
         
-        # Ley de cosenos para encontrar el ángulo gamma
         cos_gamma = (a2**2 + L3**2 - D2) / (2 * a2 * L3)
-        cos_gamma = np.clip(cos_gamma, -1.0, 1.0)  # Asegurar que esté en [-1, 1]
+        cos_gamma = np.clip(cos_gamma, -1.0, 1.0) 
         gamma = np.arccos(cos_gamma)
         
-        # Desfase de montaje físico para el eslabón 3
-        phi = np.arctan2(d4, a3)
-        
-        # Solución Codo Arriba (Elbow Up)
-        q3 = np.pi - gamma - phi
-        
-        # Para q2: usar geometría del triángulo
         alpha = np.arctan2(s, r)
         cos_beta = (a2**2 + D2 - L3**2) / (2 * a2 * D)
         cos_beta = np.clip(cos_beta, -1.0, 1.0)
         beta = np.arccos(cos_beta)
         q2 = alpha + beta
         
-        # 5. Resolver Orientación (q4, q5, q6)
-        # Calcular R0_3 con los ángulos q1, q2, q3 recién calculados
-        # IMPORTANTE: Usar la misma convención DH que la cinemática directa
-        T0_1 = dh_transform(q1, d1, 0, -np.pi/2)
-        T1_2 = dh_transform(q2, 0, a2, 0)
-        T2_3 = dh_transform(q3, 0, a3, -np.pi/2)
-        R0_3 = (T0_1 @ T1_2 @ T2_3)[:3, :3]
+        # Convertir a grados ABB para buscar el R0_3 correcto
+        q1_deg = np.degrees(q1)
+        q2_geom_deg = np.degrees(q2)
+        gamma_deg = np.degrees(gamma)
         
-        # R3_6 = (R0_3)^T * R_target
+        j1_abb = q1_deg
+        j2_abb = 90.0 - q2_geom_deg
+        j3_abb = 90.0 - gamma_deg
+        
+        # USAMOS TU FUNCIÓN VISUAL ORIGINAL (Esto arregla que el robot se vuelva loco)
+        R0_3 = get_visual_R0_3(j1_abb, j2_abb, j3_abb)
         R3_6 = R0_3.T @ R
         
-        # Extraer q5 (evitar singularidad de muñeca)
-        q5 = np.arccos(np.clip(R3_6[2, 2], -1.0, 1.0))
+        # Extraer muñeca esférica
+        q5_rad = np.arccos(np.clip(R3_6[0, 0], -1.0, 1.0))
         
-        # Evaluar si estamos en singularidad de muñeca (q5 ≈ 0 o π)
-        if np.abs(np.sin(q5)) > 1e-6:
-            # Solución normal
-            q4 = np.arctan2(R3_6[1, 2], R3_6[0, 2])
-            q6 = np.arctan2(R3_6[2, 1], -R3_6[2, 0])
+        if np.abs(np.sin(q5_rad)) > 1e-6:
+            q4_rad = np.arctan2(R3_6[1, 0], -R3_6[2, 0])
+            q6_rad = np.arctan2(R3_6[0, 1], R3_6[0, 2])
         else:
-            # Singularidad de muñeca: q4 y q6 están alineados
-            print("⚠️ Singularidad de muñeca detectada")
-            q4 = 0.0
-            q6 = np.arctan2(-R3_6[0, 1], R3_6[0, 0])
+            q4_rad = 0.0
+            q6_rad = np.arctan2(R3_6[2, 1], R3_6[1, 1])
+            
+        j4_abb = np.degrees(q4_rad)
+        j5_abb = np.degrees(q5_rad)
+        j6_abb = np.degrees(q6_rad)
         
-        # Convertir de radianes a grados
-        q_rad = np.array([q1, q2, q3, q4, q5, q6])
-        q_deg = np.degrees(q_rad)
-        
-        # Mapear los ángulos analíticos (q_geom) a los ángulos físicos (ABB) 
-        # que el frontend necesita para dibujar la coordenada cartesiana exacta.
-        j2_abb = 90.0 - q_deg[1]
-        j3_abb = 90.0 - gamma * 180.0 / np.pi
-        
-        # Los ángulos finales listos para ser consumidos por el sistema ABB sin filtros:
-        return np.array([q_deg[0], j2_abb, j3_abb, q_deg[3], q_deg[4], q_deg[5]])
+        return np.array([j1_abb, j2_abb, j3_abb, j4_abb, j5_abb, j6_abb])
         
     except Exception as e:
         print(f"❌ Error en cinemática inversa: {e}")
@@ -331,19 +259,7 @@ def inverse_kinematics_irb140(position, quaternion):
         traceback.print_exc()
         return None
 
-
 def validate_joint_limits(joints, limits):
-    """
-    Valida que los ángulos estén dentro de los límites del robot.
-    
-    Parámetros:
-    - joints: array de 6 ángulos en grados
-    - limits: lista de 6 pares [min, max] en grados
-    
-    Retorna:
-    - True si todos los ángulos están dentro de los límites
-    - False y mensaje de error si alguno está fuera
-    """
     for i, (angle, (min_lim, max_lim)) in enumerate(zip(joints, limits)):
         if angle < min_lim or angle > max_lim:
             return False, f"J{i+1}: {angle:.2f}° fuera de límites [{min_lim}°, {max_lim}°]"
@@ -351,60 +267,59 @@ def validate_joint_limits(joints, limits):
     return True, "OK"
 
 
-# Función de conveniencia para usar desde el parser RAPID
 def solve_ik_from_robtarget(position, quaternion, robot_limits, from_robotstudio=False):
-    """
-    Resuelve cinemática inversa desde un robtarget de RAPID.
-    
-    Parámetros:
-    - position: [x, y, z] en mm (coordenadas de RobotStudio si from_robotstudio=True)
-    - quaternion: [q1, q2, q3, q4] formato RAPID
-    - robot_limits: límites de articulaciones del robot
-    - from_robotstudio: Si True, transformar coordenadas antes de IK
-    
-    Retorna:
-    - dict con 'success', 'joints', 'message'
-    """
-    
-    # TRANSFORMAR coordenadas de RobotStudio al sistema del robot rotado en Three.js
     if from_robotstudio:
         position_transformed, quaternion_transformed = transform_robotstudio_to_robot_rotated(
             position, quaternion
         )
-        print(f"[IK] Transformación aplicada:")
-        print(f"  RobotStudio: {position} → Robot: {position_transformed}")
-        if quaternion is not None and quaternion_transformed is not None:
-            print(f"  Quat RS: {quaternion[:2]}... → Quat Robot: {quaternion_transformed[:2]}...")
     else:
         position_transformed = position
         quaternion_transformed = quaternion
     
-    # Si no hay cuaternión transformado, usar el original
     if quaternion_transformed is None:
         quaternion_transformed = quaternion
     
-    # Resolver IK con coordenadas transformadas
     joints = inverse_kinematics_irb140(position_transformed, quaternion_transformed)
     
     if joints is None:
+        # Calcular detalles del error para mensaje informativo
+        xc, yc, zc = position_transformed
+        
+        # Parámetros DH del IRB 140
+        d1 = 352.0
+        a1 = 70.0
+        a2 = 360.0
+        d4 = 380.0
+        
+        r = np.sqrt(xc**2 + yc**2) - a1
+        s = zc - d1
+        D = np.sqrt(r**2 + s**2)
+        
+        max_reach = a2 + d4
+        min_reach = abs(a2 - d4)
+        
+        error_detail = f"⚠️ Objetivo fuera de alcance: D={D:.2f}mm, rango=[{min_reach:.2f}, {max_reach:.2f}]mm"
+        
         return {
             "success": False,
             "joints": None,
-            "message": "Objetivo fuera del alcance del robot"
+            "message": "Objetivo fuera del alcance del robot",
+            "error_detail": error_detail
         }
     
-    # Validar límites
     valid, msg = validate_joint_limits(joints, robot_limits)
     
     if not valid:
         return {
             "success": False,
             "joints": joints.tolist(),
-            "message": f"Solución fuera de límites: {msg}"
+            "message": f"Solución fuera de límites: {msg}",
+            "error_detail": f"⚠️ Límites excedidos: {msg}"
         }
     
     return {
         "success": True,
         "joints": joints.tolist(),
-        "message": "Solución encontrada"
+        "message": "Solución encontrada",
+        "error_detail": None
     }

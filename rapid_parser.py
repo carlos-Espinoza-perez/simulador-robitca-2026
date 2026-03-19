@@ -1,311 +1,462 @@
 """
-Parser de código RAPID para ABB
-Convierte código RAPID a una lista de movimientos ejecutables
+Parser de código RAPID para ABB - Versión robusta
+Convierte código RAPID a una lista de movimientos ejecutables.
+
+Soporta:
+  - Declaraciones CONST, VAR, PERS (jointtarget y robtarget)
+  - Movimientos MoveAbsJ, MoveJ, MoveL, MoveC
+  - Formatos flexibles: case-insensitive, espacios/tabs arbitrarios
+  - Parámetros opcionales (\\NoEOffs, \\Wobj, etc.)
+  - Líneas partidas o pegadas, múltiples instrucciones por línea
+  - Comentarios (!) en cualquier posición
+  - Instrucciones no reconocidas se saltan sin error
 """
 
 import re
 from typing import List, Dict, Any, Tuple, Optional
-import numpy as np
 
+
+# ---------------------------------------------------------------------------
+#  Utilidades de bajo nivel
+# ---------------------------------------------------------------------------
+
+def _strip_comments(text: str) -> str:
+    """Elimina comentarios RAPID (todo después de '!' fuera de cadenas)."""
+    result = []
+    in_string = False
+    for ch in text:
+        if ch == '"':
+            in_string = not in_string
+        if ch == '!' and not in_string:
+            break
+        result.append(ch)
+    return ''.join(result)
+
+
+def _extract_nested_arrays(text: str) -> List[str]:
+    """Extrae el contenido de los arrays internos de una estructura RAPID
+       como [[a,b,c],[d,e,f,g],[...],[...]]  →  ["a,b,c", "d,e,f,g", ...]
+    """
+    arrays: List[str] = []
+    depth = 0
+    buf: List[str] = []
+    for ch in text:
+        if ch == '[':
+            depth += 1
+            if depth == 2:          # inicio de sub-array
+                buf = []
+            elif depth > 2:         # arrays más profundos (poco frecuente)
+                buf.append(ch)
+        elif ch == ']':
+            if depth == 2:          # fin de sub-array
+                arrays.append(''.join(buf))
+            elif depth > 2:
+                buf.append(ch)
+            depth -= 1
+        elif depth >= 2:
+            buf.append(ch)
+    return arrays
+
+
+def _parse_float_list(csv: str) -> List[float]:
+    """Convierte "1.2, 3e-4, 9E+9, -0.5" → [1.2, 0.0003, 9e9, -0.5]"""
+    values = []
+    for token in csv.split(','):
+        token = token.strip()
+        if not token:
+            continue
+        values.append(float(token))
+    return values
+
+
+# ---------------------------------------------------------------------------
+#  Clase principal
+# ---------------------------------------------------------------------------
 
 class RapidParser:
     def __init__(self):
-        self.constants = {}
-        self.procedures = {}
-        self.current_module = None
-        
-    def parse(self, rapid_code: str) -> Dict[str, Any]:
-        """
-        Parsea código RAPID y retorna una estructura de datos ejecutable
-        """
-        # Normalizar el código: agregar saltos de línea en puntos clave
-        rapid_code = rapid_code.replace(';', ';\n')  # Después de punto y coma
-        rapid_code = rapid_code.replace('MODULE ', '\nMODULE ')  # Antes de MODULE
-        rapid_code = rapid_code.replace('CONST ', '\nCONST ')  # Antes de CONST
-        rapid_code = rapid_code.replace('PROC ', '\nPROC ')  # Antes de PROC
-        rapid_code = rapid_code.replace('ENDPROC', '\nENDPROC\n')  # Alrededor de ENDPROC
-        rapid_code = rapid_code.replace('ENDMODULE', '\nENDMODULE\n')  # Alrededor de ENDMODULE
-        
-        lines = rapid_code.strip().split('\n')
-        
-        # Limpiar líneas
-        lines = [self._clean_line(line) for line in lines]
-        lines = [line for line in lines if line and line != ';']  # Remover líneas vacías y solo punto y coma
-        
-        # Parsear constantes y procedimientos
-        i = 0
-        while i < len(lines):
-            line = lines[i]
-            
-            # Detectar MODULE
-            if line.startswith('MODULE'):
-                self.current_module = self._extract_module_name(line)
-                
-            # Detectar CONST
-            elif line.startswith('CONST'):
-                const_name, const_value = self._parse_constant(line)
-                if const_name:
-                    self.constants[const_name] = const_value
-                    
-            # Detectar PROC
-            elif line.startswith('PROC'):
-                proc_name = self._extract_proc_name(line)
+        self.targets: Dict[str, Dict[str, Any]] = {}   # Constantes/variables declaradas
+        self.procedures: Dict[str, List[str]] = {}
+        self.module_name: str = "Unknown"
+        self.warnings: List[str] = []
+
+    # ------------------------------------------------------------------
+    #  Paso 1 – Pre-procesamiento
+    # ------------------------------------------------------------------
+    def _preprocess(self, raw: str) -> List[str]:
+        """Convierte texto crudo en una lista de sentencias limpias."""
+
+        # 1. Normalizar saltos de línea
+        raw = raw.replace('\r\n', '\n').replace('\r', '\n')
+
+        # 2. Eliminar comentarios línea a línea
+        lines = [_strip_comments(line) for line in raw.split('\n')]
+
+        # 3. Unir todo en un blob
+        blob = ' '.join(lines)
+
+        # 4. Insertar separadores sintéticos antes de keywords de bloque
+        #    que en RAPID no llevan ';' (MODULE, ENDMODULE, PROC, ENDPROC)
+        #    Usamos ';' como separador universal interno.
+        block_keywords = [
+            r'\bMODULE\b', r'\bENDMODULE\b', r'\bPROC\b', r'\bENDPROC\b',
+            r'\bCONST\b', r'\bVAR\b', r'\bPERS\b', r'\bLOCAL\b',
+        ]
+        for kw in block_keywords:
+            blob = re.sub(
+                r'(?<![;\s])(\s+)(' + kw + r')',
+                r'; \2',
+                blob,
+                flags=re.IGNORECASE
+            )
+
+        # 5. Separar por ';'
+        statements = blob.split(';')
+
+        # 6. Limpiar cada sentencia
+        clean: List[str] = []
+        for stmt in statements:
+            s = ' '.join(stmt.split())     # colapsar whitespace
+            s = s.strip()
+            if s:
+                clean.append(s)
+        return clean
+
+    # ------------------------------------------------------------------
+    #  Paso 2 – Parsear declaraciones y body
+    # ------------------------------------------------------------------
+    def _classify_statements(self, statements: List[str]):
+        """Clasifica cada sentencia como declaración, inicio/fin de bloque,
+           o instrucción de cuerpo."""
+        current_proc: Optional[str] = None
+        proc_body: List[str] = []
+
+        for stmt in statements:
+            upper = stmt.upper().lstrip()
+
+            # MODULE
+            m = re.match(r'MODULE\s+(\w+)', stmt, re.IGNORECASE)
+            if m:
+                self.module_name = m.group(1)
+                continue
+
+            # ENDMODULE
+            if upper.startswith('ENDMODULE'):
+                continue
+
+            # CONST / VAR / PERS  (declaración de target)
+            m = re.match(
+                r'(?:CONST|VAR|PERS|LOCAL\s+CONST|LOCAL\s+VAR|LOCAL\s+PERS)'
+                r'\s+(jointtarget|robtarget|tooldata|wobjdata|speeddata|zonedata|num|bool|string)\s+'
+                r'(\w+)\s*:=\s*(.+)',
+                stmt, re.IGNORECASE
+            )
+            if m:
+                dtype = m.group(1).lower()
+                name  = m.group(2)
+                value = m.group(3)
+                self._store_target(dtype, name, value)
+                continue
+
+            # PROC
+            m = re.match(r'PROC\s+(\w+)\s*\(', stmt, re.IGNORECASE)
+            if m:
+                current_proc = m.group(1).lower()
                 proc_body = []
-                i += 1
-                
-                # Leer cuerpo del procedimiento
-                while i < len(lines) and not lines[i].startswith('ENDPROC'):
-                    if lines[i]:
-                        proc_body.append(lines[i])
-                    i += 1
-                    
-                self.procedures[proc_name] = proc_body
-                
-            i += 1
-        
-        # Generar lista de movimientos desde el procedimiento main
-        movements = []
+                continue
+            # PROC sin paréntesis  (PROC main)
+            m = re.match(r'PROC\s+(\w+)', stmt, re.IGNORECASE)
+            if m and current_proc is None:
+                current_proc = m.group(1).lower()
+                proc_body = []
+                continue
+
+            # ENDPROC
+            if upper.startswith('ENDPROC'):
+                if current_proc is not None:
+                    self.procedures[current_proc] = proc_body
+                    current_proc = None
+                    proc_body = []
+                continue
+
+            # Instrucción dentro de un PROC
+            if current_proc is not None:
+                proc_body.append(stmt)
+            # Si no estamos en un PROC, podría ser una declaración inline
+            # (ya manejada arriba) o algo que ignoramos
+
+        # Si un PROC no se cerró correctamente, guardarlo igualmente
+        if current_proc is not None and proc_body:
+            self.procedures[current_proc] = proc_body
+
+    # ------------------------------------------------------------------
+    #  Almacenar target (jointtarget / robtarget)
+    # ------------------------------------------------------------------
+    def _store_target(self, dtype: str, name: str, value_str: str):
+        """Parsea y almacena una constante de tipo jointtarget o robtarget."""
+        try:
+            arrays = _extract_nested_arrays(value_str)
+            if dtype == 'jointtarget' and len(arrays) >= 1:
+                joints = _parse_float_list(arrays[0])
+                self.targets[name] = {
+                    "type": "joint",
+                    "joints": joints
+                }
+            elif dtype == 'robtarget' and len(arrays) >= 2:
+                position   = _parse_float_list(arrays[0])
+                quaternion = _parse_float_list(arrays[1])
+                self.targets[name] = {
+                    "type": "cartesian",
+                    "position": position,
+                    "quaternion": quaternion
+                }
+            # Otros tipos (tooldata, speeddata, etc.) se ignoran silenciosamente
+        except Exception as e:
+            self.warnings.append(f"No se pudo parsear '{name}': {e}")
+
+    # ------------------------------------------------------------------
+    #  Paso 3 – Convertir instrucciones en movimientos
+    # ------------------------------------------------------------------
+    def _parse_movements(self, body: List[str]) -> List[Dict[str, Any]]:
+        movements: List[Dict[str, Any]] = []
+
+        for stmt in body:
+            mv = self._try_parse_movement(stmt)
+            if mv is not None:
+                movements.append(mv)
+        return movements
+
+    def _try_parse_movement(self, stmt: str) -> Optional[Dict[str, Any]]:
+        """Intenta parsear una sentencia como un movimiento."""
+        upper = stmt.upper().lstrip()
+
+        if upper.startswith('MOVEABSJ'):
+            return self._parse_moveabsj(stmt)
+        if upper.startswith('MOVEJ'):
+            return self._parse_movej(stmt)
+        if upper.startswith('MOVEL'):
+            return self._parse_movel(stmt)
+        if upper.startswith('MOVEC'):
+            return self._parse_movec(stmt)
+        # Instrucciones no-movimiento:  WaitTime, SetDO, TPWrite, etc.
+        # Se ignoran sin error.
+        return None
+
+    # ---------- MoveAbsJ ----------
+    def _parse_moveabsj(self, stmt: str) -> Optional[Dict[str, Any]]:
+        """MoveAbsJ target[\\NoEOffs], speed, zone, tool[\\Wobj:=...];"""
+        try:
+            # Quitar el nombre de la instrucción
+            rest = re.sub(r'^MoveAbsJ\s+', '', stmt, flags=re.IGNORECASE).strip()
+            # Quitar modificadores opcionales  (\NoEOffs, \Wobj:=..., etc.)
+            rest = re.sub(r'\\{1,2}[A-Za-z]\w*(?::=[^\s,]*)?', '', rest)
+            # Separar tokens por coma
+            tokens = [t.strip() for t in rest.split(',') if t.strip()]
+
+            if not tokens:
+                return None
+
+            target_name = tokens[0]
+            speed = self._find_speed(tokens)
+            zone  = self._find_zone(tokens)
+
+            if target_name in self.targets:
+                target = self.targets[target_name]
+                if target['type'] == 'joint':
+                    return {
+                        "type": "MoveAbsJ",
+                        "target": target_name,
+                        "joints": target['joints'],
+                        "speed": speed,
+                        "zone": zone
+                    }
+                elif target['type'] == 'cartesian':
+                    return {
+                        "type": "MoveAbsJ",
+                        "target": target_name,
+                        "target_type": "cartesian",
+                        "data": target,
+                        "speed": speed,
+                        "zone": zone
+                    }
+            else:
+                self.warnings.append(f"Target '{target_name}' no declarado (MoveAbsJ)")
+            return None
+        except Exception as e:
+            self.warnings.append(f"Error en MoveAbsJ: {e}")
+            return None
+
+    # ---------- MoveJ ----------
+    def _parse_movej(self, stmt: str) -> Optional[Dict[str, Any]]:
+        try:
+            rest = re.sub(r'^MoveJ\s+', '', stmt, flags=re.IGNORECASE).strip()
+            rest = re.sub(r'\\{1,2}[A-Za-z]\w*(?::=[^\s,]*)?', '', rest)
+            tokens = [t.strip() for t in rest.split(',') if t.strip()]
+
+            if not tokens:
+                return None
+
+            target_name = tokens[0]
+            speed = self._find_speed(tokens)
+            zone  = self._find_zone(tokens)
+
+            if target_name in self.targets:
+                target = self.targets[target_name]
+                result = {
+                    "type": "MoveJ",
+                    "target": target_name,
+                    "target_type": target['type'],
+                    "data": target,
+                    "speed": speed,
+                    "zone": zone
+                }
+                if target['type'] == 'joint':
+                    result['joints'] = target['joints']
+                return result
+            else:
+                self.warnings.append(f"Target '{target_name}' no declarado (MoveJ)")
+            return None
+        except Exception as e:
+            self.warnings.append(f"Error en MoveJ: {e}")
+            return None
+
+    # ---------- MoveL ----------
+    def _parse_movel(self, stmt: str) -> Optional[Dict[str, Any]]:
+        try:
+            rest = re.sub(r'^MoveL\s+', '', stmt, flags=re.IGNORECASE).strip()
+            rest = re.sub(r'\\{1,2}[A-Za-z]\w*(?::=[^\s,]*)?', '', rest)
+            tokens = [t.strip() for t in rest.split(',') if t.strip()]
+
+            if not tokens:
+                return None
+
+            target_name = tokens[0]
+            speed = self._find_speed(tokens)
+            zone  = self._find_zone(tokens)
+
+            if target_name in self.targets:
+                target = self.targets[target_name]
+                return {
+                    "type": "MoveL",
+                    "target": target_name,
+                    "target_type": target['type'],
+                    "data": target,
+                    "speed": speed,
+                    "zone": zone
+                }
+            else:
+                self.warnings.append(f"Target '{target_name}' no declarado (MoveL)")
+            return None
+        except Exception as e:
+            self.warnings.append(f"Error en MoveL: {e}")
+            return None
+
+    # ---------- MoveC ----------
+    def _parse_movec(self, stmt: str) -> Optional[Dict[str, Any]]:
+        try:
+            rest = re.sub(r'^MoveC\s+', '', stmt, flags=re.IGNORECASE).strip()
+            rest = re.sub(r'\\{1,2}[A-Za-z]\w*(?::=[^\s,]*)?', '', rest)
+            tokens = [t.strip() for t in rest.split(',') if t.strip()]
+
+            # MoveC necesita al menos 2 targets: via_point, to_point
+            if len(tokens) < 2:
+                return None
+
+            via_name = tokens[0]
+            to_name  = tokens[1]
+            speed = self._find_speed(tokens)
+            zone  = self._find_zone(tokens)
+
+            if via_name in self.targets and to_name in self.targets:
+                return {
+                    "type": "MoveC",
+                    "via_point": via_name,
+                    "to_point": to_name,
+                    "via_data": self.targets[via_name],
+                    "to_data": self.targets[to_name],
+                    "speed": speed,
+                    "zone": zone
+                }
+            else:
+                missing = []
+                if via_name not in self.targets:
+                    missing.append(via_name)
+                if to_name not in self.targets:
+                    missing.append(to_name)
+                self.warnings.append(f"Targets no declarados en MoveC: {missing}")
+            return None
+        except Exception as e:
+            self.warnings.append(f"Error en MoveC: {e}")
+            return None
+
+    # ------------------------------------------------------------------
+    #  Helpers para extraer speed / zone de tokens
+    # ------------------------------------------------------------------
+    def _find_speed(self, tokens: List[str]) -> str:
+        """Busca un token de velocidad como v100, v1000, vmax (case-insensitive)."""
+        for t in tokens:
+            m = re.match(r'^(v\d+|vmax)$', t, re.IGNORECASE)
+            if m:
+                return m.group(0).lower()
+        return "v1000"
+
+    def _find_zone(self, tokens: List[str]) -> str:
+        """Busca un token de zona como fine, z1, z5, z10, z50, z100, z200."""
+        for t in tokens:
+            tl = t.lower()
+            if tl == 'fine':
+                return 'fine'
+            m = re.match(r'^z\d+$', tl)
+            if m:
+                return tl
+        return "fine"
+
+    # ------------------------------------------------------------------
+    #  Punto de entrada público
+    # ------------------------------------------------------------------
+    def parse(self, rapid_code: str) -> Dict[str, Any]:
+        """Parsea código RAPID y retorna estructura ejecutable."""
+        self.targets = {}
+        self.procedures = {}
+        self.module_name = "Unknown"
+        self.warnings = []
+
+        # Paso 1: Pre-procesar
+        statements = self._preprocess(rapid_code)
+
+        # Paso 2: Clasificar sentencias
+        self._classify_statements(statements)
+
+        # Paso 3: Generar lista de movimientos desde "main"
+        movements: List[Dict[str, Any]] = []
         if 'main' in self.procedures:
             movements = self._parse_movements(self.procedures['main'])
-        
+        else:
+            # Tal vez el único PROC no se llama main
+            for proc_name, body in self.procedures.items():
+                movements = self._parse_movements(body)
+                if movements:
+                    self.warnings.append(
+                        f"No se encontró PROC main, usando PROC {proc_name}"
+                    )
+                    break
+
         return {
             "success": True,
-            "module": self.current_module,
-            "constants": self.constants,
+            "module": self.module_name,
+            "constants": self.targets,
             "procedures": list(self.procedures.keys()),
             "movements": movements,
-            "total_steps": len(movements)
+            "total_steps": len(movements),
+            "warnings": self.warnings
         }
-    
-    def _clean_line(self, line: str) -> str:
-        """Limpia una línea de código"""
-        # Remover comentarios
-        if '!' in line:
-            line = line[:line.index('!')]
-        # Remover espacios extra
-        line = line.strip()
-        # Agregar espacio después de punto y coma si no existe (para separar comandos en una línea)
-        line = line.replace(';', '; ')
-        return line
-    
-    def _extract_module_name(self, line: str) -> str:
-        """Extrae el nombre del módulo"""
-        match = re.search(r'MODULE\s+(\w+)', line)
-        return match.group(1) if match else "Unknown"
-    
-    def _extract_proc_name(self, line: str) -> str:
-        """Extrae el nombre del procedimiento"""
-        match = re.search(r'PROC\s+(\w+)', line)
-        return match.group(1) if match else "unknown"
-    
-    def _parse_constant(self, line: str) -> Tuple[Optional[str], Optional[Dict]]:
-        """Parsea una constante RAPID"""
-        try:
-            # CONST jointtarget NAME:=[[j1,j2,j3,j4,j5,j6],[...]]
-            # CONST robtarget NAME:=[[x,y,z],[q1,q2,q3,q4],[...],[...]]
-            
-            match = re.search(r'CONST\s+(\w+)\s+(\w+):=(.+)', line)
-            if not match:
-                return None, None
-            
-            const_type = match.group(1)
-            const_name = match.group(2)
-            const_value = match.group(3)
-            
-            # Extraer arrays anidados correctamente
-            arrays = self._extract_nested_arrays(const_value)
-            
-            if const_type == 'jointtarget':
-                # Extraer ángulos de articulaciones (primer array)
-                if len(arrays) >= 1:
-                    joints = [float(x.strip()) for x in arrays[0].split(',')]
-                    return const_name, {
-                        "type": "joint",
-                        "joints": joints
-                    }
-                    
-            elif const_type == 'robtarget':
-                # Extraer posición cartesiana y cuaternión
-                # [[x,y,z],[q1,q2,q3,q4],[...],[...]]
-                if len(arrays) >= 2:
-                    position = [float(x.strip()) for x in arrays[0].split(',')]
-                    quaternion = [float(x.strip().replace('E-', 'e-').replace('E+', 'e+')) 
-                                 for x in arrays[1].split(',')]
-                    return const_name, {
-                        "type": "cartesian",
-                        "position": position,
-                        "quaternion": quaternion
-                    }
-            
-            return None, None
-            
-        except Exception as e:
-            print(f"Error parseando constante: {line}, Error: {e}")
-            return None, None
-    
-    def _extract_nested_arrays(self, text: str) -> List[str]:
-        """Extrae arrays de un texto que puede contener arrays anidados"""
-        arrays = []
-        depth = 0
-        current_array = ""
-        
-        for char in text:
-            if char == '[':
-                depth += 1
-                if depth > 1:  # Solo capturar contenido de arrays internos
-                    current_array = ""
-            elif char == ']':
-                depth -= 1
-                if depth == 1:  # Fin de un array interno
-                    arrays.append(current_array)
-                    current_array = ""
-            elif depth > 1:  # Dentro de un array interno
-                current_array += char
-        
-        return arrays
-    
-    def _parse_movements(self, proc_body: List[str]) -> List[Dict[str, Any]]:
-        """Parsea los movimientos de un procedimiento"""
-        movements = []
-        
-        for i, line in enumerate(proc_body):
-            movement = None
-            
-            # MoveAbsJ - Movimiento absoluto de articulaciones
-            if line.startswith('MoveAbsJ'):
-                movement = self._parse_move_absj(line)
-                
-            # MoveJ - Movimiento de articulaciones
-            elif line.startswith('MoveJ'):
-                movement = self._parse_move_j(line)
-                
-            # MoveL - Movimiento lineal
-            elif line.startswith('MoveL'):
-                movement = self._parse_move_l(line)
-                
-            # MoveC - Movimiento circular
-            elif line.startswith('MoveC'):
-                movement = self._parse_move_c(line)
-            
-            if movement:
-                movements.append(movement)
-        
-        return movements
-    
-    def _parse_move_absj(self, line: str) -> Optional[Dict[str, Any]]:
-        """Parsea MoveAbsJ"""
-        try:
-            # MoveAbsJ ZERO\NoEOffs, v1000, fine, tool0;
-            # Remover modificadores como \NoEOffs
-            line = line.replace('\\NoEOffs', '').replace('\\NoEoffs', '')
-            
-            match = re.search(r'MoveAbsJ\s+(\w+)', line)
-            if match:
-                target_name = match.group(1)
-                
-                if target_name in self.constants:
-                    target = self.constants[target_name]
-                    if target['type'] == 'joint':
-                        return {
-                            "type": "MoveAbsJ",
-                            "target": target_name,
-                            "joints": target['joints'],
-                            "speed": self._extract_speed(line),
-                            "zone": self._extract_zone(line)
-                        }
-            return None
-        except Exception as e:
-            print(f"Error parseando MoveAbsJ: {line}, Error: {e}")
-            return None
-    
-    def _parse_move_j(self, line: str) -> Optional[Dict[str, Any]]:
-        """Parsea MoveJ"""
-        try:
-            # MoveJ P10, v1000, fine, tool0;
-            match = re.search(r'MoveJ\s+(\w+)', line)
-            if match:
-                target_name = match.group(1)
-                
-                if target_name in self.constants:
-                    target = self.constants[target_name]
-                    
-                    return {
-                        "type": "MoveJ",
-                        "target": target_name,
-                        "target_type": target['type'],
-                        "data": target,
-                        "speed": self._extract_speed(line),
-                        "zone": self._extract_zone(line)
-                    }
-            return None
-        except Exception as e:
-            print(f"Error parseando MoveJ: {line}, Error: {e}")
-            return None
-    
-    def _parse_move_l(self, line: str) -> Optional[Dict[str, Any]]:
-        """Parsea MoveL"""
-        try:
-            # MoveL P20, v1000, fine, tool0;
-            match = re.search(r'MoveL\s+(\w+)', line)
-            if match:
-                target_name = match.group(1)
-                
-                if target_name in self.constants:
-                    target = self.constants[target_name]
-                    
-                    return {
-                        "type": "MoveL",
-                        "target": target_name,
-                        "target_type": target['type'],
-                        "data": target,
-                        "speed": self._extract_speed(line),
-                        "zone": self._extract_zone(line)
-                    }
-            return None
-        except Exception as e:
-            print(f"Error parseando MoveL: {line}, Error: {e}")
-            return None
-    
-    def _parse_move_c(self, line: str) -> Optional[Dict[str, Any]]:
-        """Parsea MoveC (movimiento circular)"""
-        try:
-            # MoveC P80, P90, v100, fine, tool0;
-            match = re.search(r'MoveC\s+(\w+),\s*(\w+)', line)
-            if match:
-                via_point = match.group(1)
-                to_point = match.group(2)
-                
-                if via_point in self.constants and to_point in self.constants:
-                    return {
-                        "type": "MoveC",
-                        "via_point": via_point,
-                        "to_point": to_point,
-                        "via_data": self.constants[via_point],
-                        "to_data": self.constants[to_point],
-                        "speed": self._extract_speed(line),
-                        "zone": self._extract_zone(line)
-                    }
-            return None
-        except Exception as e:
-            print(f"Error parseando MoveC: {line}, Error: {e}")
-            return None
-    
-    def _extract_speed(self, line: str) -> str:
-        """Extrae la velocidad del comando"""
-        match = re.search(r'v(\d+)', line)
-        return f"v{match.group(1)}" if match else "v1000"
-    
-    def _extract_zone(self, line: str) -> str:
-        """Extrae la zona del comando"""
-        if 'fine' in line:
-            return "fine"
-        match = re.search(r'z(\d+)', line)
-        return f"z{match.group(1)}" if match else "fine"
 
+
+# ---------------------------------------------------------------------------
+#  API pública
+# ---------------------------------------------------------------------------
 
 def parse_rapid_code(rapid_code: str) -> Dict[str, Any]:
-    """
-    Función principal para parsear código RAPID
-    """
+    """Función principal para parsear código RAPID."""
     parser = RapidParser()
     return parser.parse(rapid_code)

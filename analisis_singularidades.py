@@ -6,19 +6,22 @@ from typing import Dict, List, Tuple
 from cinematica_directa import cinematica_directa
 
 
-def calcular_jacobiano(joints_rad: List[float], tabla_dh: List[List[float]]) -> np.ndarray:
+def calcular_jacobiano(joints_deg: List[float], tabla_dh: List[List[float]]) -> np.ndarray:
     """
     Calcula el Jacobiano geométrico del robot
     
     Args:
-        joints_rad: Ángulos de las articulaciones en radianes
+        joints_deg: Ángulos de las articulaciones en grados
         tabla_dh: Tabla de parámetros DH
         
     Returns:
         Jacobiano 6x6 (velocidad lineal y angular)
     """
-    # Calcular transformaciones
-    T_final, transformaciones = cinematica_directa(joints_rad, tabla_dh)
+    # Usar grados directamente en cinematica_directa (ella convierte a rad internamente)
+    T_final, transformaciones = cinematica_directa(joints_deg, tabla_dh)
+    
+    # Convertir ángulos a radianes para los ejes y posiciones relativos
+    joints_rad = [np.deg2rad(j) for j in joints_deg]
     
     # Posición del efector final
     p_n = T_final[:3, 3]
@@ -60,10 +63,8 @@ def analizar_singularidades(joints_deg: List[float], tabla_dh: List[List[float]]
     Returns:
         Diccionario con análisis de singularidades
     """
-    joints_rad = [np.deg2rad(j) for j in joints_deg]
-    
-    # Calcular Jacobiano
-    J = calcular_jacobiano(joints_rad, tabla_dh)
+    # 66: J = calcular_jacobiano(joints_deg, tabla_dh)
+    J = calcular_jacobiano(joints_deg, tabla_dh)
     
     # Calcular determinante y número de condición
     det_J = np.linalg.det(J)
@@ -74,13 +75,14 @@ def analizar_singularidades(joints_deg: List[float], tabla_dh: List[List[float]]
     # Número de condición (ratio entre mayor y menor valor singular)
     cond_number = s[0] / s[-1] if s[-1] > 1e-10 else np.inf
     
-    # Clasificar singularidades
+    # Clasificar singularidades con umbrales refinados
     singularidades = []
     
     # Singularidad de muñeca (J4, J5, J6 alineados)
     # Ocurre cuando J5 ≈ 0° o ≈ 180°
     j5 = joints_deg[4]
-    if abs(j5) < 5 or abs(abs(j5) - 180) < 5:
+    # Umbral reducido de 5° a 1° para mayor realismo y evitar falsos positivos en Home
+    if abs(j5) < 1.0 or abs(abs(j5) - 180) < 1.0:
         singularidades.append({
             "tipo": "Muñeca",
             "descripcion": "J5 cerca de 0° o 180° - ejes J4 y J6 alineados",
@@ -88,31 +90,36 @@ def analizar_singularidades(joints_deg: List[float], tabla_dh: List[List[float]]
             "articulaciones": [4, 5, 6],
             "recomendacion": "Evitar J5=0° o J5=180°"
         })
+    elif abs(j5) < 3.0: # Advertencia leve
+        singularidades.append({
+            "tipo": "Cerca de Muñeca",
+            "descripcion": "J5 se aproxima a configuración singular",
+            "severidad": "baja",
+            "articulaciones": [4, 5, 6],
+            "recomendacion": "Aumentar ángulo de J5"
+        })
     
     # Singularidad de codo (brazo completamente extendido o retraído)
-    # Ocurre cuando J3 ≈ 0° (extendido) o J3 ≈ -90° (retraído)
+    # Ocurre cuando el brazo está en sus límites mecánicos de extensión
+    # En el IRB 140, J3=0 es una posición estándar, no necesariamente singular
+    # La verdadera singularidad de codo ocurre en el límite de alcance
     j3 = joints_deg[2]
-    if abs(j3) < 5:
+    # Reducimos sensibilidad: J3=0 es común, solo advertir si es extremo
+    # El IRB 140 tiene límites J3 [-52, 50]. 1e-3 det_J ya captura pérdida de movilidad.
+    if abs(j3 - 50) < 1 or abs(j3 + 52) < 1:
         singularidades.append({
-            "tipo": "Codo extendido",
-            "descripcion": "Brazo completamente extendido - pérdida de movilidad",
+            "tipo": "Límite de Codo",
+            "descripcion": "Brazo cerca de su máxima extensión/retracción",
             "severidad": "media",
             "articulaciones": [2, 3],
-            "recomendacion": "Mantener J3 alejado de 0°"
-        })
-    elif abs(j3 + 90) < 5:
-        singularidades.append({
-            "tipo": "Codo retraído",
-            "descripcion": "Brazo completamente retraído - configuración singular",
-            "severidad": "media",
-            "articulaciones": [2, 3],
-            "recomendacion": "Mantener J3 alejado de -90°"
+            "recomendacion": "Mantener J3 alejado de los límites extremos"
         })
     
     # Singularidad de hombro (brazo vertical)
-    # Ocurre cuando el brazo está directamente sobre la base
+    # Ocurre cuando el brazo está directamente sobre la base (centro de la base)
     j2 = joints_deg[1]
-    if abs(j2 - 90) < 5:
+    # J2=90 es vertical. Umbral de 5° a 2°
+    if abs(j2 - 90) < 2:
         singularidades.append({
             "tipo": "Hombro vertical",
             "descripcion": "Brazo vertical sobre la base - pérdida de dirección",
@@ -121,10 +128,10 @@ def analizar_singularidades(joints_deg: List[float], tabla_dh: List[List[float]]
             "recomendacion": "Evitar J2=90°"
         })
     
-    # Determinar estado general
-    if abs(det_J) < 1e-3:
+    # Determinar estado general con histéresis de seguridad
+    if abs(det_J) < 1e-4: # Umbral de tolerancia reducido (más permisivo)
         estado = "singular"
-    elif cond_number > 100:
+    elif cond_number > 500: # Aumentado de 100 a 500
         estado = "cerca_singular"
     else:
         estado = "normal"

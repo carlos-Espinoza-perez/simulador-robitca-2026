@@ -247,36 +247,44 @@ def rotar_vector(v: np.ndarray, eje: np.ndarray, angulo: float) -> np.ndarray:
 
 def calcular_num_pasos_por_velocidad(velocidad: str, distancia: float = None) -> int:
     """
-    Calcula el número de pasos de interpolación según la velocidad
+    Calcula el número de pasos de interpolación realista según la velocidad (mm/s)
+    y la distancia real (mm), asumiendo que el servidor actualiza a 20 FPS (50ms).
     
     Args:
-        velocidad: String de velocidad (v100, v500, v1000, etc.)
-        distancia: Distancia del movimiento (opcional, para ajustar)
+        velocidad: String de velocidad (ej. v100, v500, v1000, vMAX)
+        distancia: Distancia física del movimiento en mm (opcional)
         
     Returns:
-        Número de pasos de interpolación
+        Número de pasos de interpolación (mínimo 2)
     """
-    # Extraer valor numérico
     import re
-    match = re.search(r'v(\d+)', velocidad)
-    if not match:
-        return 30  # Default aumentado
+    match = re.search(r'v(\d+)', velocidad.lower())
     
-    vel_valor = int(match.group(1))
-    
-    # Mapear velocidad a número de pasos (AUMENTADO para movimientos visibles)
-    # Más pasos = movimiento más suave y visible
-    # v100 (lento) -> muchos pasos
-    # v1000 (rápido) -> menos pasos pero aún visibles
-    if vel_valor <= 100:
-        pasos = 100  # Muy lento
-    elif vel_valor <= 200:
-        pasos = 80
-    elif vel_valor <= 500:
-        pasos = 60
-    elif vel_valor <= 1000:
-        pasos = 40
+    if match:
+        vel_mm_s = float(match.group(1))
+    elif 'max' in velocidad.lower():
+        vel_mm_s = 2000.0  # Asumimos vMAX en este simulador
     else:
-        pasos = 30  # Para velocidades muy altas
+        vel_mm_s = 1000.0  # Default fallback
+        
+    # Evitamos divisiones por 0
+    if vel_mm_s <= 0:
+        vel_mm_s = 1000.0
+        
+    # El simulador en `execute_rapid_stream` usa sleep(0.05) -> 20 FPS
+    tiempo_por_paso = 0.05 
     
-    return pasos
+    if distancia is not None and distancia > 0:
+        # Tiempo real que RobotStudio tardaría = Distancia (mm) / Velocidad (mm/s)
+        tiempo_total_segundos = distancia / vel_mm_s
+        pasos = tiempo_total_segundos / tiempo_por_paso
+    else:
+        # Modo fallback: Si no pasa distancia, aproximamos como si el robot
+        # estuviera moviendo una magnitud promedio (ej. 300 milimetros)
+        distancia_media = 300.0
+        tiempo_total_segundos = distancia_media / vel_mm_s
+        pasos = tiempo_total_segundos / tiempo_por_paso
+
+    # Restringimos a 500 iteraciones por instrucción (tope de seguridad ~25 segundos)
+    # y mínimo garantizamos 2 pasos para que exista un movimiento interpolado visual
+    return min(max(int(round(pasos)), 2), 500)

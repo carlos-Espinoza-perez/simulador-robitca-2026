@@ -2,6 +2,8 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 import numpy as np
+import os
+import json
 from datetime import datetime
 
 from especificaciones_robot import ROBOTS
@@ -357,7 +359,7 @@ def execute_rapid():
                     movement_data['quaternion'] = quaternion
                     
                     # Resolver cinemática inversa
-                    ik_result = solve_ik_from_robtarget(position, quaternion, limites)
+                    ik_result = solve_ik_from_robtarget(position, quaternion, limites, from_robotstudio=True)
                     
                     if ik_result['success']:
                         movement_data['joints'] = ik_result['joints']
@@ -386,7 +388,7 @@ def execute_rapid():
                     movement_data['quaternion'] = quaternion
                     
                     # Resolver cinemática inversa
-                    ik_result = solve_ik_from_robtarget(position, quaternion, limites)
+                    ik_result = solve_ik_from_robtarget(position, quaternion, limites, from_robotstudio=True)
                     
                     if ik_result['success']:
                         movement_data['joints'] = ik_result['joints']
@@ -520,7 +522,7 @@ def interpolate_rapid():
                     target_quaternion = cart_data['quaternion']
                     
                     # Resolver cinemática inversa
-                    ik_result = solve_ik_from_robtarget(target_position, target_quaternion, limites)
+                    ik_result = solve_ik_from_robtarget(target_position, target_quaternion, limites, from_robotstudio=True)
                     
                     if ik_result['success']:
                         target_joints = ik_result['joints']
@@ -577,7 +579,7 @@ def interpolate_rapid():
                     
                     # Resolver IK para cada punto
                     for j, pose in enumerate(trayectoria_cart):
-                        ik_result = solve_ik_from_robtarget(pose['position'], pose['quaternion'], limites)
+                        ik_result = solve_ik_from_robtarget(pose['position'], pose['quaternion'], limites, from_robotstudio=True)
                         
                         if ik_result['success']:
                             estado = calcular_estado(ik_result['joints'])
@@ -619,7 +621,7 @@ def interpolate_rapid():
                 
                 # Resolver IK para cada punto
                 for j, pose in enumerate(trayectoria_cart):
-                    ik_result = solve_ik_from_robtarget(pose['position'], pose['quaternion'], limites)
+                    ik_result = solve_ik_from_robtarget(pose['position'], pose['quaternion'], limites, from_robotstudio=True)
                     
                     if ik_result['success']:
                         estado = calcular_estado(ik_result['joints'])
@@ -710,12 +712,44 @@ def mover_robot_ws(data):
         emit('error', {"mensaje": str(e)})
 
 
+@app.route('/api/robot/workspace', methods=['GET'])
+def get_workspace():
+    """Retorna los puntos del espacio de trabajo pre-calculados."""
+    try:
+        path = os.path.join(os.getcwd(), 'workspace_points.json')
+        if os.path.exists(path):
+            with open(path, 'r') as f:
+                points = json.load(f)
+            return jsonify({
+                "success": True, 
+                "count": len(points),
+                "points": points
+            })
+        else:
+            return jsonify({
+                "success": False, 
+                "error": "Archivo de workspace no encontrado. Ejecute generar_workspace.py primero."
+            }), 404
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+abort_execution_flag = False
+
+@socketio.on('abort_rapid_execution')
+def abort_rapid_execution():
+    global abort_execution_flag
+    abort_execution_flag = True
+    print("[WS] Solicitud de abortar ejecución recibida.")
+
 @socketio.on('execute_rapid_stream')
 def execute_rapid_stream(data):
     """
     Ejecuta código RAPID con streaming de puntos
     Envía cada punto conforme se calcula para ejecución inmediata
     """
+    global abort_execution_flag
+    abort_execution_flag = False
+    
     try:
         code = data.get('code')
         
@@ -743,22 +777,57 @@ def execute_rapid_stream(data):
         # Convertir cuaternión de dict a lista [x, y, z, w]
         current_quaternion = quat_dict_to_list(current_estado['orientacion']['cuaternion'])
         
+        execution_error = False
         point_count = 0
         
         for i, movement in enumerate(movements):
-            num_pasos = calcular_num_pasos_por_velocidad(movement.get('speed', 'v1000'))
+            if execution_error or abort_execution_flag:
+                if abort_execution_flag:
+                    emit('rapid_error', {"message": "Ejecución detenida por el usuario", "type": "warning"})
+                break
             
             # Procesar según tipo de movimiento
             if movement['type'] in ['MoveAbsJ', 'MoveJ']:
                 if 'joints' in movement:
                     target_joints = movement['joints']
+                    dist = 300.0  # Estimación base
+                    estado_target = calcular_estado(target_joints)
+                    if estado_target.get('success'):
+                        target_pos = [estado_target['posicion']['x'], estado_target['posicion']['y'], estado_target['posicion']['z']]
+                        dist = float(np.linalg.norm(np.array(current_position) - np.array(target_pos)))
+                    num_pasos = calcular_num_pasos_por_velocidad(movement.get('speed', 'v1000'), dist)
+
                     trayectoria_joints = interpolar_joints(current_joints, target_joints, num_pasos)
                     
                     for j, joints in enumerate(trayectoria_joints):
+                        if abort_execution_flag:
+                            execution_error = True
+                            emit('rapid_error', {"message": "Ejecución detenida por el usuario", "type": "warning"})
+                            break
+                        
                         estado = calcular_estado(joints)
                         if estado.get('success'):
+                            # Analizar singularidades en el punto final
+                            analisis = None
+                            is_final_point = (j == len(trayectoria_joints) - 1)
+                            
+                            # Omitir análisis solo para objetivos conocidos como ZERO o HOME
+                            target_name = str(movement.get('target', '')).upper()
+                            es_home_zero = any(name in target_name for name in ['ZERO', 'HOME'])
+                            
+                            if is_final_point and not es_home_zero:
+                                analisis = analisis_completo(joints, tabla_dh, limites)
+                                # Emitir advertencia si hay singularidad
+                                if analisis and analisis['estado_general'] in ['singular', 'advertencia']:
+                                    singularidades_detectadas = analisis['singularidades']['singularidades']
+                                    for sing in singularidades_detectadas:
+                                        emit('rapid_console', {
+                                            "message": f"⚠️ Singularidad detectada: {sing['tipo']} - {sing['descripcion']} (Movimiento {i+1}: {movement['type']} {movement.get('target', '')})",
+                                            "type": "warning"
+                                        })
+                            
                             point_count += 1
-                            emit('rapid_point', {
+                            point_data = {
                                 "step": point_count,
                                 "movement_index": i,
                                 "type": movement['type'],
@@ -766,36 +835,73 @@ def execute_rapid_stream(data):
                                 "joints": joints,
                                 "position": estado['posicion'],
                                 "orientation": estado['orientacion'],
-                                "is_intermediate": j < len(trayectoria_joints) - 1
-                            })
-                            # Delay para visualización suave (50ms por paso)
+                                "is_intermediate": not is_final_point
+                            }
+                            if analisis:
+                                point_data["singularity_analysis"] = analisis
+                                
+                            emit('rapid_point', point_data)
                             socketio.sleep(0.05)
+                        else:
+                            # Error de límites o cinemática
+                            execution_error = True
+                            emit('rapid_error', {
+                                "message": f"Error de límites en MoveJ (Movimiento {i+1}: {movement['type']} {movement.get('target', '')})",
+                                "type": "error"
+                            })
+                            break
                     
-                    current_joints = target_joints
-                    current_estado = calcular_estado(current_joints)
-                    current_position = [
-                        current_estado['posicion']['x'],
-                        current_estado['posicion']['y'],
-                        current_estado['posicion']['z']
-                    ]
-                    current_quaternion = quat_dict_to_list(current_estado['orientacion']['cuaternion'])
+                    if not execution_error:
+                        current_joints = target_joints
+                        current_estado = calcular_estado(current_joints)
+                        current_position = [
+                            current_estado['posicion']['x'],
+                            current_estado['posicion']['y'],
+                            current_estado['posicion']['z']
+                        ]
+                        current_quaternion = quat_dict_to_list(current_estado['orientacion']['cuaternion'])
                     
                 elif movement.get('target_type') == 'cartesian':
                     cart_data = movement['data']
                     target_position = cart_data['position']
                     target_quaternion = cart_data['quaternion']
                     
-                    ik_result = solve_ik_from_robtarget(target_position, target_quaternion, limites)
+                    dist = float(np.linalg.norm(np.array(current_position) - np.array(target_position)))
+                    num_pasos = calcular_num_pasos_por_velocidad(movement.get('speed', 'v1000'), dist)
+                    
+                    ik_result = solve_ik_from_robtarget(target_position, target_quaternion, limites, from_robotstudio=True)
+                    
                     
                     if ik_result['success']:
                         target_joints = ik_result['joints']
                         trayectoria_joints = interpolar_joints(current_joints, target_joints, num_pasos)
                         
                         for j, joints in enumerate(trayectoria_joints):
+                            if abort_execution_flag:
+                                execution_error = True
+                                emit('rapid_error', {"message": "Ejecución detenida por el usuario", "type": "warning"})
+                                break
+                            
                             estado = calcular_estado(joints)
                             if estado.get('success'):
+                                analisis = None
+                                is_final_point = (j == len(trayectoria_joints) - 1)
+                                
+                                target_name = str(movement.get('target', '')).upper()
+                                es_home_zero = any(name in target_name for name in ['ZERO', 'HOME'])
+                                
+                                if is_final_point and not es_home_zero:
+                                    analisis = analisis_completo(joints, tabla_dh, limites)
+                                    if analisis and analisis['estado_general'] in ['singular', 'advertencia']:
+                                        singularidades_detectadas = analisis['singularidades']['singularidades']
+                                        for sing in singularidades_detectadas:
+                                            emit('rapid_console', {
+                                                "message": f"⚠️ Singularidad detectada: {sing['tipo']} - {sing['descripcion']} (Movimiento {i+1}: {movement['type']} {movement.get('target', '')})",
+                                                "type": "warning"
+                                            })
+                                
                                 point_count += 1
-                                emit('rapid_point', {
+                                point_data = {
                                     "step": point_count,
                                     "movement_index": i,
                                     "type": movement['type'],
@@ -803,19 +909,40 @@ def execute_rapid_stream(data):
                                     "joints": joints,
                                     "position": estado['posicion'],
                                     "orientation": estado['orientacion'],
-                                    "is_intermediate": j < len(trayectoria_joints) - 1
-                                })
+                                    "is_intermediate": not is_final_point
+                                }
+                                if analisis:
+                                    point_data["singularity_analysis"] = analisis
+                                
+                                emit('rapid_point', point_data)
                                 socketio.sleep(0.05)
+                            else:
+                                execution_error = True
+                                emit('rapid_error', {
+                                    "message": f"Error de límites en MoveJ (Movimiento {i+1}: {movement['type']} {movement.get('target', '')})",
+                                    "type": "error"
+                                })
+                                break
                         
-                        current_joints = target_joints
-                        current_position = target_position
-                        current_quaternion = target_quaternion
-                    
+                        if not execution_error:
+                            current_joints = target_joints
+                            current_position = target_position
+                            current_quaternion = target_quaternion
+                    else:
+                        execution_error = True
+                        emit('rapid_error', {
+                            "message": f"{ik_result.get('error_detail') or 'Error IK'} (Movimiento {i+1}: {movement['type']} {movement.get('target', '')})",
+                            "type": "error"
+                        })
+                        break
+            
             elif movement['type'] == 'MoveL':
                 if movement.get('target_type') == 'cartesian':
-                    cart_data = movement['data']
-                    target_position = cart_data['position']
-                    target_quaternion = cart_data['quaternion']
+                    target_position = movement['data']['position']
+                    target_quaternion = movement['data']['quaternion']
+                    
+                    dist = float(np.linalg.norm(np.array(current_position) - np.array(target_position)))
+                    num_pasos = calcular_num_pasos_por_velocidad(movement.get('speed', 'v1000'), dist)
                     
                     trayectoria_cart = interpolar_lineal_cartesiano(
                         current_position, current_quaternion,
@@ -823,14 +950,36 @@ def execute_rapid_stream(data):
                         num_pasos
                     )
                     
+                    
                     for j, pose in enumerate(trayectoria_cart):
-                        ik_result = solve_ik_from_robtarget(pose['position'], pose['quaternion'], limites)
+                        if abort_execution_flag:
+                            execution_error = True
+                            emit('rapid_error', {"message": "Ejecución detenida por el usuario", "type": "warning"})
+                            break
+                        
+                        ik_result = solve_ik_from_robtarget(pose['position'], pose['quaternion'], limites, from_robotstudio=True)
                         
                         if ik_result['success']:
                             estado = calcular_estado(ik_result['joints'])
                             if estado.get('success'):
+                                analisis = None
+                                is_final_point = (j == len(trayectoria_cart) - 1)
+                                
+                                target_name = str(movement.get('target', '')).upper()
+                                es_home_zero = any(name in target_name for name in ['ZERO', 'HOME'])
+                                
+                                if is_final_point and not es_home_zero:
+                                    analisis = analisis_completo(ik_result['joints'], tabla_dh, limites)
+                                    if analisis and analisis['estado_general'] in ['singular', 'advertencia']:
+                                        singularidades_detectadas = analisis['singularidades']['singularidades']
+                                        for sing in singularidades_detectadas:
+                                            emit('rapid_console', {
+                                                "message": f"⚠️ Singularidad detectada: {sing['tipo']} - {sing['descripcion']} (Movimiento {i+1}: {movement['type']} {movement.get('target', '')})",
+                                                "type": "warning"
+                                            })
+                                
                                 point_count += 1
-                                emit('rapid_point', {
+                                point_data = {
                                     "step": point_count,
                                     "movement_index": i,
                                     "type": movement['type'],
@@ -838,23 +987,37 @@ def execute_rapid_stream(data):
                                     "joints": ik_result['joints'],
                                     "position": estado['posicion'],
                                     "orientation": estado['orientacion'],
-                                    "is_intermediate": j < len(trayectoria_cart) - 1
-                                })
+                                    "is_intermediate": not is_final_point
+                                }
+                                if analisis:
+                                    point_data["singularity_analysis"] = analisis
+                                
+                                emit('rapid_point', point_data)
                                 socketio.sleep(0.05)
+                        else:
+                            execution_error = True
+                            emit('rapid_error', {
+                                "message": f"{ik_result.get('error_detail') or 'Error IK'} (Movimiento {i+1}: {movement['type']} {movement.get('target', '')})",
+                                "type": "error"
+                            })
+                            break
+                        
+                        if execution_error:
+                            break
                     
-                    if ik_result['success']:
+                    if not execution_error:
                         current_joints = ik_result['joints']
                         current_position = target_position
                         current_quaternion = target_quaternion
-                    
+            
             elif movement['type'] == 'MoveC':
-                via_data = movement['via_data']
-                to_data = movement['to_data']
+                via_position = movement['via_data']['position']
+                via_quaternion = movement['via_data']['quaternion']
+                to_position = movement['to_data']['position']
+                to_quaternion = movement['to_data']['quaternion']
                 
-                via_position = via_data['position']
-                via_quaternion = via_data['quaternion']
-                to_position = to_data['position']
-                to_quaternion = to_data['quaternion']
+                dist = float(np.linalg.norm(np.array(current_position) - np.array(via_position)) + np.linalg.norm(np.array(via_position) - np.array(to_position)))
+                num_pasos = calcular_num_pasos_por_velocidad(movement.get('speed', 'v1000'), dist)
                 
                 trayectoria_cart = interpolar_circular(
                     current_position, current_quaternion,
@@ -863,14 +1026,36 @@ def execute_rapid_stream(data):
                     num_pasos
                 )
                 
+                
                 for j, pose in enumerate(trayectoria_cart):
-                    ik_result = solve_ik_from_robtarget(pose['position'], pose['quaternion'], limites)
+                    if abort_execution_flag:
+                        execution_error = True
+                        emit('rapid_error', {"message": "Ejecución detenida por el usuario", "type": "warning"})
+                        break
+                    
+                    ik_result = solve_ik_from_robtarget(pose['position'], pose['quaternion'], limites, from_robotstudio=True)
                     
                     if ik_result['success']:
                         estado = calcular_estado(ik_result['joints'])
                         if estado.get('success'):
+                            analisis = None
+                            is_final_point = (j == len(trayectoria_cart) - 1)
+                            
+                            target_name = f"{movement.get('via_point', '')} -> {movement.get('to_point', '')}".upper()
+                            es_home_zero = any(name in target_name for name in ['ZERO', 'HOME'])
+                            
+                            if is_final_point and not es_home_zero:
+                                analisis = analisis_completo(ik_result['joints'], tabla_dh, limites)
+                                if analisis and analisis['estado_general'] in ['singular', 'advertencia']:
+                                    singularidades_detectadas = analisis['singularidades']['singularidades']
+                                    for sing in singularidades_detectadas:
+                                        emit('rapid_console', {
+                                            "message": f"⚠️ Singularidad detectada en trayecto circular: {sing['tipo']} (Movimiento {i+1})",
+                                            "type": "warning"
+                                        })
+                            
                             point_count += 1
-                            emit('rapid_point', {
+                            point_data = {
                                 "step": point_count,
                                 "movement_index": i,
                                 "type": movement['type'],
@@ -878,20 +1063,36 @@ def execute_rapid_stream(data):
                                 "joints": ik_result['joints'],
                                 "position": estado['posicion'],
                                 "orientation": estado['orientacion'],
-                                "is_intermediate": j < len(trayectoria_cart) - 1
-                            })
+                                "is_intermediate": not is_final_point
+                            }
+                            if analisis:
+                                point_data["singularity_analysis"] = analisis
+                            
+                            emit('rapid_point', point_data)
                             socketio.sleep(0.05)
+                    else:
+                        execution_error = True
+                        emit('rapid_error', {
+                            "message": f"{ik_result.get('error_detail') or 'Error IK en arco circular'} (Movimiento {i+1})",
+                            "type": "error"
+                        })
+                        break
+                    
+                    if execution_error:
+                        break
                 
-                if ik_result['success']:
+                if not execution_error:
                     current_joints = ik_result['joints']
                     current_position = to_position
                     current_quaternion = to_quaternion
         
-        # Enviar señal de completado
-        emit('rapid_complete', {
-            "total_points": point_count,
-            "total_movements": len(movements)
-        })
+        # Enviar señal de completado si no hubo errores críiticos
+        if not execution_error:
+            emit('rapid_complete', {
+                "success": True,
+                "total_points": point_count,
+                "total_movements": len(movements)
+            })
         
     except Exception as e:
         import traceback
