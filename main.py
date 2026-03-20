@@ -156,13 +156,17 @@ def info_robot():
 def estado():
     estado_actual = calcular_estado(estado_robot["angulos"])
     
-    # Agregar análisis de singularidades
-    analisis = analisis_completo(
-        [np.rad2deg(a) for a in estado_robot["angulos"]], 
-        tabla_dh, 
-        limites
-    )
-    estado_actual["analisis_singularidades"] = analisis
+    # Agregar análisis de singularidades con manejo de errores
+    try:
+        analisis = analisis_completo(
+            [np.rad2deg(a) for a in estado_robot["angulos"]], 
+            tabla_dh, 
+            limites
+        )
+        estado_actual["analisis_singularidades"] = analisis
+    except Exception as e:
+        print(f"⚠ Error en análisis de singularidades: {e}")
+        estado_actual["analisis_singularidades"] = None
     
     return jsonify(estado_actual)
 
@@ -180,7 +184,14 @@ def analizar_configuracion():
         if all(abs(j) < 10 for j in joints_deg):  # Probablemente radianes
             joints_deg = [np.rad2deg(j) for j in joints_deg]
         
-        analisis = analisis_completo(joints_deg, tabla_dh, limites)
+        try:
+            analisis = analisis_completo(joints_deg, tabla_dh, limites)
+        except Exception as e:
+            print(f"⚠ Error en análisis de singularidades: {e}")
+            return jsonify({
+                "success": False,
+                "error": f"Error en análisis SVD: {str(e)}"
+            }), 500
         
         return jsonify({
             "success": True,
@@ -777,6 +788,9 @@ def execute_rapid_stream(data):
         # Convertir cuaternión de dict a lista [x, y, z, w]
         current_quaternion = quat_dict_to_list(current_estado['orientacion']['cuaternion'])
         
+        # Variable para rastrear últimos joints analizados (para detectar movimientos pequeños)
+        last_analyzed_joints = current_joints.copy()
+        
         execution_error = False
         point_count = 0
         
@@ -815,16 +829,34 @@ def execute_rapid_stream(data):
                             target_name = str(movement.get('target', '')).upper()
                             es_home_zero = any(name in target_name for name in ['ZERO', 'HOME'])
                             
-                            if is_final_point and not es_home_zero:
-                                analisis = analisis_completo(joints, tabla_dh, limites)
-                                # Emitir advertencia si hay singularidad
-                                if analisis and analisis['estado_general'] in ['singular', 'advertencia']:
-                                    singularidades_detectadas = analisis['singularidades']['singularidades']
-                                    for sing in singularidades_detectadas:
-                                        emit('rapid_console', {
-                                            "message": f"⚠️ Singularidad detectada: {sing['tipo']} - {sing['descripcion']} (Movimiento {i+1}: {movement['type']} {movement.get('target', '')})",
-                                            "type": "warning"
-                                        })
+                            # Calcular cambio articular desde el último análisis
+                            joint_change = np.linalg.norm(np.array(joints) - np.array(last_analyzed_joints))
+                            
+                            # Analizar solo si:
+                            # 1. Es punto final, Y
+                            # 2. El cambio es significativo (> 2°), Y
+                            # 3. No es HOME/ZERO
+                            should_analyze = (
+                                is_final_point and 
+                                joint_change > 2.0 and 
+                                not es_home_zero
+                            )
+                            
+                            if should_analyze:
+                                try:
+                                    analisis = analisis_completo(joints, tabla_dh, limites)
+                                    last_analyzed_joints = joints.copy()
+                                    # Emitir advertencia si hay singularidad
+                                    if analisis and analisis['estado_general'] in ['singular', 'advertencia']:
+                                        singularidades_detectadas = analisis['singularidades']['singularidades']
+                                        for sing in singularidades_detectadas:
+                                            emit('rapid_console', {
+                                                "message": f"⚠️ Singularidad detectada: {sing['tipo']} - {sing['descripcion']} (Movimiento {i+1}: {movement['type']} {movement.get('target', '')})",
+                                                "type": "warning"
+                                            })
+                                except Exception as e:
+                                    print(f"⚠ Error en análisis de singularidades: {e}")
+                                    # Continuar sin análisis
                             
                             point_count += 1
                             point_data = {
@@ -890,15 +922,30 @@ def execute_rapid_stream(data):
                                 target_name = str(movement.get('target', '')).upper()
                                 es_home_zero = any(name in target_name for name in ['ZERO', 'HOME'])
                                 
-                                if is_final_point and not es_home_zero:
-                                    analisis = analisis_completo(joints, tabla_dh, limites)
-                                    if analisis and analisis['estado_general'] in ['singular', 'advertencia']:
-                                        singularidades_detectadas = analisis['singularidades']['singularidades']
-                                        for sing in singularidades_detectadas:
-                                            emit('rapid_console', {
-                                                "message": f"⚠️ Singularidad detectada: {sing['tipo']} - {sing['descripcion']} (Movimiento {i+1}: {movement['type']} {movement.get('target', '')})",
-                                                "type": "warning"
-                                            })
+                                # Calcular cambio articular desde el último análisis
+                                joint_change = np.linalg.norm(np.array(joints) - np.array(last_analyzed_joints))
+                                
+                                # Analizar solo si el cambio es significativo
+                                should_analyze = (
+                                    is_final_point and 
+                                    joint_change > 2.0 and 
+                                    not es_home_zero
+                                )
+                                
+                                if should_analyze:
+                                    try:
+                                        analisis = analisis_completo(joints, tabla_dh, limites)
+                                        last_analyzed_joints = joints.copy()
+                                        if analisis and analisis['estado_general'] in ['singular', 'advertencia']:
+                                            singularidades_detectadas = analisis['singularidades']['singularidades']
+                                            for sing in singularidades_detectadas:
+                                                emit('rapid_console', {
+                                                    "message": f"⚠️ Singularidad detectada: {sing['tipo']} - {sing['descripcion']} (Movimiento {i+1}: {movement['type']} {movement.get('target', '')})",
+                                                    "type": "warning"
+                                                })
+                                    except Exception as e:
+                                        print(f"⚠ Error en análisis de singularidades: {e}")
+                                        # Continuar sin análisis
                                 
                                 point_count += 1
                                 point_data = {
@@ -968,15 +1015,30 @@ def execute_rapid_stream(data):
                                 target_name = str(movement.get('target', '')).upper()
                                 es_home_zero = any(name in target_name for name in ['ZERO', 'HOME'])
                                 
-                                if is_final_point and not es_home_zero:
-                                    analisis = analisis_completo(ik_result['joints'], tabla_dh, limites)
-                                    if analisis and analisis['estado_general'] in ['singular', 'advertencia']:
-                                        singularidades_detectadas = analisis['singularidades']['singularidades']
-                                        for sing in singularidades_detectadas:
-                                            emit('rapid_console', {
-                                                "message": f"⚠️ Singularidad detectada: {sing['tipo']} - {sing['descripcion']} (Movimiento {i+1}: {movement['type']} {movement.get('target', '')})",
-                                                "type": "warning"
-                                            })
+                                # Calcular cambio articular desde el último análisis
+                                joint_change = np.linalg.norm(np.array(ik_result['joints']) - np.array(last_analyzed_joints))
+                                
+                                # Analizar solo si el cambio es significativo
+                                should_analyze = (
+                                    is_final_point and 
+                                    joint_change > 2.0 and 
+                                    not es_home_zero
+                                )
+                                
+                                if should_analyze:
+                                    try:
+                                        analisis = analisis_completo(ik_result['joints'], tabla_dh, limites)
+                                        last_analyzed_joints = ik_result['joints'].copy()
+                                        if analisis and analisis['estado_general'] in ['singular', 'advertencia']:
+                                            singularidades_detectadas = analisis['singularidades']['singularidades']
+                                            for sing in singularidades_detectadas:
+                                                emit('rapid_console', {
+                                                    "message": f"⚠️ Singularidad detectada: {sing['tipo']} - {sing['descripcion']} (Movimiento {i+1}: {movement['type']} {movement.get('target', '')})",
+                                                    "type": "warning"
+                                                })
+                                    except Exception as e:
+                                        print(f"⚠ Error en análisis de singularidades: {e}")
+                                        # Continuar sin análisis
                                 
                                 point_count += 1
                                 point_data = {
@@ -1044,15 +1106,34 @@ def execute_rapid_stream(data):
                             target_name = f"{movement.get('via_point', '')} -> {movement.get('to_point', '')}".upper()
                             es_home_zero = any(name in target_name for name in ['ZERO', 'HOME'])
                             
-                            if is_final_point and not es_home_zero:
-                                analisis = analisis_completo(ik_result['joints'], tabla_dh, limites)
-                                if analisis and analisis['estado_general'] in ['singular', 'advertencia']:
-                                    singularidades_detectadas = analisis['singularidades']['singularidades']
-                                    for sing in singularidades_detectadas:
-                                        emit('rapid_console', {
-                                            "message": f"⚠️ Singularidad detectada en trayecto circular: {sing['tipo']} (Movimiento {i+1})",
-                                            "type": "warning"
-                                        })
+                            # Calcular cambio articular desde el último análisis
+                            joint_change = np.linalg.norm(np.array(ik_result['joints']) - np.array(last_analyzed_joints))
+                            
+                            # Analizar solo si el cambio es significativo
+                            should_analyze = (
+                                is_final_point and 
+                                joint_change > 2.0 and 
+                                not es_home_zero
+                            )
+                            
+                            if should_analyze:
+                                try:
+                                    analisis = analisis_completo(ik_result['joints'], tabla_dh, limites)
+                                    last_analyzed_joints = ik_result['joints'].copy()
+                                    if analisis and analisis['estado_general'] in ['singular', 'advertencia']:
+                                        singularidades_detectadas = analisis['singularidades']['singularidades']
+                                        for sing in singularidades_detectadas:
+                                            emit('rapid_console', {
+                                                "message": f"⚠️ Singularidad detectada en trayecto circular: {sing['tipo']} (Movimiento {i+1})",
+                                                "type": "warning"
+                                            })
+                                except Exception as e:
+                                    print(f"⚠ Error en análisis de singularidades: {e}")
+                                    # Continuar sin análisis
+                            else:
+                                # Si no se analiza, actualizar la referencia de todos modos
+                                if is_final_point:
+                                    last_analyzed_joints = ik_result['joints'].copy()
                             
                             point_count += 1
                             point_data = {
@@ -1070,18 +1151,18 @@ def execute_rapid_stream(data):
                             
                             emit('rapid_point', point_data)
                             socketio.sleep(0.05)
+                        else:
+                            # Error de cinemática directa
+                            print(f"⚠ Error de cinemática directa en MoveC punto {j+1}/{len(trayectoria_cart)}")
+                            # Continuar con el siguiente punto en lugar de romper
+                            continue
                     else:
-                        execution_error = True
-                        emit('rapid_error', {
-                            "message": f"{ik_result.get('error_detail') or 'Error IK en arco circular'} (Movimiento {i+1})",
-                            "type": "error"
-                        })
-                        break
-                    
-                    if execution_error:
-                        break
+                        # Error de IK
+                        print(f"⚠ Error IK en MoveC punto {j+1}/{len(trayectoria_cart)}: {ik_result.get('error', 'Unknown')}")
+                        # Continuar con el siguiente punto en lugar de romper
+                        continue
                 
-                if not execution_error:
+                if not execution_error and ik_result and ik_result.get('success'):
                     current_joints = ik_result['joints']
                     current_position = to_position
                     current_quaternion = to_quaternion

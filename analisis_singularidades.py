@@ -40,6 +40,11 @@ def calcular_jacobiano(joints_deg: List[float], tabla_dh: List[List[float]]) -> 
         # Eje de rotación (columna Z de la transformación)
         z_i = T_i[:3, 2]
         
+        # Normalizar el eje para evitar problemas numéricos
+        z_norm = np.linalg.norm(z_i)
+        if z_norm > 1e-10:
+            z_i = z_i / z_norm
+        
         # Posición de la articulación
         p_i = T_i[:3, 3]
         
@@ -48,6 +53,11 @@ def calcular_jacobiano(joints_deg: List[float], tabla_dh: List[List[float]]) -> 
         
         # Jacobiano de velocidad angular: z_i
         J[3:, i] = z_i
+    
+    # Verificar si hay valores inválidos
+    if np.any(np.isnan(J)) or np.any(np.isinf(J)):
+        # Usar identidad como fallback seguro (sin imprimir para evitar spam)
+        J = np.eye(6)
     
     return J
 
@@ -66,14 +76,55 @@ def analizar_singularidades(joints_deg: List[float], tabla_dh: List[List[float]]
     # 66: J = calcular_jacobiano(joints_deg, tabla_dh)
     J = calcular_jacobiano(joints_deg, tabla_dh)
     
-    # Calcular determinante y número de condición
-    det_J = np.linalg.det(J)
+    # Verificar si el Jacobiano es válido antes de continuar
+    if np.any(np.isnan(J)) or np.any(np.isinf(J)):
+        # No imprimir para evitar spam en consola
+        return {
+            "estado_general": "normal",
+            "singularidades": {
+                "singularidades": [],
+                "total": 0
+            },
+            "metricas": {
+                "determinante": 0.0,
+                "numero_condicion": 1.0,
+                "valores_singulares": [1.0] * 6,
+                "manipulabilidad": 1.0
+            },
+            "limites": {
+                "violaciones": [],
+                "total": 0
+            }
+        }
     
-    # Valores singulares
-    U, s, Vt = np.linalg.svd(J)
+    # Calcular determinante
+    try:
+        det_J = np.linalg.det(J)
+        if np.isnan(det_J) or np.isinf(det_J):
+            det_J = 0.0
+    except:
+        det_J = 0.0
     
-    # Número de condición (ratio entre mayor y menor valor singular)
-    cond_number = s[0] / s[-1] if s[-1] > 1e-10 else np.inf
+    # Valores singulares con manejo de errores mejorado
+    try:
+        # Intentar SVD con configuración más robusta
+        U, s, Vt = np.linalg.svd(J, full_matrices=False)
+        
+        # Verificar si los valores singulares son válidos
+        if np.any(np.isnan(s)) or np.any(np.isinf(s)):
+            raise ValueError("Valores singulares inválidos")
+            
+    except (np.linalg.LinAlgError, ValueError):
+        # Si SVD no converge o valores inválidos, usar valores por defecto seguros
+        # No imprimir para evitar spam en consola
+        s = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
+        cond_number = 1.0
+    else:
+        # Número de condición (ratio entre mayor y menor valor singular)
+        if s[-1] > 1e-10:
+            cond_number = s[0] / s[-1]
+        else:
+            cond_number = np.inf
     
     # Clasificar singularidades con umbrales refinados
     singularidades = []

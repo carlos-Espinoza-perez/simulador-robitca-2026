@@ -116,30 +116,30 @@ def interpolar_circular(
     # Calcular centro y radio del círculo que pasa por los 3 puntos
     centro, radio = calcular_circulo_3_puntos(p1, p2, p3)
     
-    if centro is None:
-        # Puntos colineales, usar interpolación lineal
+    # Calculate normal to the plane using the 3 points to avoid zero vectors for semi-circles
+    v_12 = p2 - p1
+    v_13 = p3 - p1
+    cross_p = np.cross(v_12, v_13)
+    
+    if centro is None or np.linalg.norm(cross_p) < 1e-6:
+        # Puntos colineales o error al hallar centro, usar interpolación lineal
         print("Puntos colineales en MoveC, usando interpolación lineal")
         return interpolar_lineal_cartesiano(pos_inicio, quat_inicio, pos_fin, quat_fin, num_pasos)
+        
+    normal = cross_p / np.linalg.norm(cross_p)
     
-    # Vectores desde el centro a cada punto
+    # Vectores desde el centro a los puntos para ángulos
     v1 = p1 - centro
-    v2 = p2 - centro
     v3 = p3 - centro
     
-    # Calcular ángulos
-    angulo_via = np.arctan2(
-        np.dot(np.cross(v1, v2), np.cross(v1, v3)),
-        np.dot(v1, v2) * np.linalg.norm(np.cross(v1, v3))
-    )
+    sin_total = np.dot(np.cross(v1, v3), normal)
+    cos_total = np.dot(v1, v3)
+    angulo_total = np.arctan2(sin_total, cos_total)
     
-    angulo_total = np.arctan2(
-        np.dot(np.cross(v1, v3), np.cross(v1, v2)),
-        np.dot(v1, v3) * np.linalg.norm(np.cross(v1, v2))
-    )
-    
-    # Normal al plano del círculo
-    normal = np.cross(v1, v3)
-    normal = normal / np.linalg.norm(normal)
+    # El ángulo total siempre debe ser positivo debido a que la normal (cross_p)
+    # se define siguiendo la regla de la mano derecha de P1 -> P2 -> P3
+    if angulo_total <= 0:
+        angulo_total += 2 * np.pi
     
     # Generar puntos en el arco
     trayectoria = []
