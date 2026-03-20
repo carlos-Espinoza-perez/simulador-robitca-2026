@@ -1,31 +1,42 @@
-MODULE TestSingularidad
-    ! Herramienta por defecto
-    PERS tooldata tool0 := [TRUE,[[0,0,0],[1,0,0,0]],[0.001,[0,0,0.001],[1,0,0,0],0,0,0]];
-
-    ! Posición Segura 1: El robot está inclinado, J5 tiene un ángulo cómodo (~45 grados)
-    CONST robtarget pSeguro := [[450, 0, 500], [0.92388, 0, 0.38268, 0], [0,0,0,0], [9E9,9E9,9E9,9E9,9E9,9E9]];
-    
-    ! Posición Segura 2: Al otro lado del espacio de trabajo
-    CONST robtarget pDestino := [[450, 300, 500], [0.92388, 0, 0.38268, 0], [0,0,0,0], [9E9,9E9,9E9,9E9,9E9,9E9]];
-
-    ! Target Articular: Posición de Singularidad Pura (J5 = 0 exacto)
-    CONST jointtarget jSingular := [[0, 30, -30, 0, 0, 0], [9E9,9E9,9E9,9E9,9E9,9E9]];
-
-    PROC main()
-        ! 1. Iniciamos en una posición tranquila y segura
-        MoveJ pSeguro, v500, fine, tool0;
-        WaitTime 1;
-
-        ! 2. Entramos a la boca del lobo (Forzamos Singularidad)
-        ! Usamos MoveAbsJ para obligar a los motores a ir a J5 = 0.
-        ! AQUÍ TU SCRIPT DE PYTHON DEBE GRITAR: "estado_general: singular"
-        MoveAbsJ jSingular, v200, fine, tool0;
-        WaitTime 1;
-
-        ! 3. La trampa mortal: Movimiento Lineal desde una singularidad
-        ! En RobotStudio real, intentar un MoveL estando con J5=0 suele lanzar 
-        ! el error "Joint 4/6 Velocity Too High" porque el Jacobiano se vuelve loco.
-        MoveL pDestino, v100, fine, tool0;
-        
-    ENDPROC
+MODULE Module1
+    CONST jointtarget ZERO:=[[0,0,0,0,0,0],[9E+9,9E+9,9E+9,9E+9,9E+9,9E+9]];
+    CONST robtarget P10:=[[450,0,450],[4.14816E-8,6.1133E-9,-1,-2.53589E-16],[0,0,-1,0],[9E+9,9E+9,9E+9,9E+9,9E+9,9E+9]];
+    CONST robtarget P20:=[[450,0,400],[4.14816E-8,6.1133E-9,-1,-2.53589E-16],[0,0,-1,0],[9E+9,9E+9,9E+9,9E+9,9E+9,9E+9]];
+    CONST robtarget P30:=[[550,0,400],[4.14816E-8,6.1133E-9,-1,-2.53589E-16],[0,0,-1,0],[9E+9,9E+9,9E+9,9E+9,9E+9,9E+9]];
+    CONST robtarget P40:=[[550,-100,400],[4.14816E-8,6.1133E-9,-1,-2.53589E-16],[0,0,-1,0],[9E+9,9E+9,9E+9,9E+9,9E+9,9E+9]];
+    CONST robtarget P50:=[[450,-100,400],[4.14816E-8,6.1133E-9,-1,-2.53589E-16],[0,0,-1,0],[9E+9,9E+9,9E+9,9E+9,9E+9,9E+9]];
+   
+   
+    CONST robtarget P60:=[[475,-50,450],[4.14816E-8,6.1133E-9,-1,-2.53589E-16],[0,0,-1,0],[9E+9,9E+9,9E+9,9E+9,9E+9,9E+9]];
+    CONST robtarget P70:=[[475,-50,400],[4.14816E-8,6.1133E-9,-1,-2.53589E-16],[0,0,-1,0],[9E+9,9E+9,9E+9,9E+9,9E+9,9E+9]];
+   
+    CONST robtarget P80:=[[500,-75,400],[4.14816E-8,6.1133E-9,-1,-2.53589E-16],[0,0,-1,0],[9E+9,9E+9,9E+9,9E+9,9E+9,9E+9]];
+    CONST robtarget P90:=[[525,-50,400],[4.14816E-8,6.1133E-9,-1,-2.53589E-16],[0,0,-1,0],[9E+9,9E+9,9E+9,9E+9,9E+9,9E+9]];
+   
+   
+   
+    CONST robtarget P100:=[[500,-25,400],[4.14816E-8,6.1133E-9,-1,-2.53589E-16],[0,0,-1,0],[9E+9,9E+9,9E+9,9E+9,9E+9,9E+9]];
+   
+   
+    PROC main()
+        MoveAbsJ ZERO\NoEOffs, v1000, fine, tool0;
+        MoveJ P10, v1000, fine, tool0;
+        MoveL P20, v1000, fine, tool0;
+        MoveL P30, v1000, fine, tool0;
+        MoveL P40, v1000, fine, tool0;
+        MoveL P50, v1000, fine, tool0;
+        MoveL P20, v1000, fine, tool0;
+        MoveL P10, v1000, fine, tool0;
+       
+        MoveL P60, v1000, fine, tool0;
+        MoveL P70, v1000, fine, tool0;
+       
+        MoveC P80, P90, v100, fine, tool0;
+        MoveC P100, P70, v100, fine, tool0;
+       
+        MoveL P60, v1000, fine, tool0;
+        MoveL P10, v1000, fine, tool0;
+       
+        MoveAbsJ ZERO\NoEOffs, v1000, fine, tool0;
+    ENDPROC
 ENDMODULE

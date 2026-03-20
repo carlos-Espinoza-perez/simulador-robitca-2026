@@ -54,14 +54,15 @@ def cinematica_directa(angulos, tabla_dh=None, tipos_articulaciones=None):
             theta = np.radians(dh[0])
             d = dh[1]
             
-        a = dh[2]
         alpha = np.radians(dh[3])
 
-        if num_joints == 6 and tabla_dh[0][1] == 352.0 and i == 0: alpha = -pi_2
+        if num_joints == 6 and tabla_dh[0][1] == 352.0 and i == 0: alpha = -pi_2; dh[2] = 70.0
         if num_joints == 6 and tabla_dh[0][1] == 352.0 and i == 1: theta -= pi_2
         if num_joints == 6 and tabla_dh[0][1] == 352.0 and i == 2: alpha = -pi_2; dh[2] = 0.0
         if num_joints == 6 and tabla_dh[0][1] == 352.0 and i == 3: alpha = pi_2
         if num_joints == 6 and tabla_dh[0][1] == 352.0 and i == 4: alpha = -pi_2
+        
+        a = dh[2]
         
         T_i = matriz_dh(theta, d, a, alpha)
         T_current = T_current @ T_i
