@@ -1,27 +1,10 @@
-"""
-Parser de código RAPID para ABB - Versión robusta
-Convierte código RAPID a una lista de movimientos ejecutables.
 
-Soporta:
-  - Declaraciones CONST, VAR, PERS (jointtarget y robtarget)
-  - Movimientos MoveAbsJ, MoveJ, MoveL, MoveC
-  - Formatos flexibles: case-insensitive, espacios/tabs arbitrarios
-  - Parámetros opcionales (\\NoEOffs, \\Wobj, etc.)
-  - Líneas partidas o pegadas, múltiples instrucciones por línea
-  - Comentarios (!) en cualquier posición
-  - Instrucciones no reconocidas se saltan sin error
-"""
 
 import re
 from typing import List, Dict, Any, Tuple, Optional
 
-
-# ---------------------------------------------------------------------------
-#  Utilidades de bajo nivel
-# ---------------------------------------------------------------------------
-
 def _strip_comments(text: str) -> str:
-    """Elimina comentarios RAPID (todo después de '!' fuera de cadenas)."""
+    
     result = []
     in_string = False
     for ch in text:
@@ -32,11 +15,8 @@ def _strip_comments(text: str) -> str:
         result.append(ch)
     return ''.join(result)
 
-
 def _extract_nested_arrays(text: str) -> List[str]:
-    """Extrae el contenido de los arrays internos de una estructura RAPID
-       como [[a,b,c],[d,e,f,g],[...],[...]]  →  ["a,b,c", "d,e,f,g", ...]
-    """
+    
     arrays: List[str] = []
     depth = 0
     buf: List[str] = []
@@ -57,9 +37,8 @@ def _extract_nested_arrays(text: str) -> List[str]:
             buf.append(ch)
     return arrays
 
-
 def _parse_float_list(csv: str) -> List[float]:
-    """Convierte "1.2, 3e-4, 9E+9, -0.5" → [1.2, 0.0003, 9e9, -0.5]"""
+    
     values = []
     for token in csv.split(','):
         token = token.strip()
@@ -68,11 +47,6 @@ def _parse_float_list(csv: str) -> List[float]:
         values.append(float(token))
     return values
 
-
-# ---------------------------------------------------------------------------
-#  Clase principal
-# ---------------------------------------------------------------------------
-
 class RapidParser:
     def __init__(self):
         self.targets: Dict[str, Dict[str, Any]] = {}   # Constantes/variables declaradas
@@ -80,24 +54,14 @@ class RapidParser:
         self.module_name: str = "Unknown"
         self.warnings: List[str] = []
 
-    # ------------------------------------------------------------------
-    #  Paso 1 – Pre-procesamiento
-    # ------------------------------------------------------------------
     def _preprocess(self, raw: str) -> List[str]:
-        """Convierte texto crudo en una lista de sentencias limpias."""
 
-        # 1. Normalizar saltos de línea
         raw = raw.replace('\r\n', '\n').replace('\r', '\n')
 
-        # 2. Eliminar comentarios línea a línea
         lines = [_strip_comments(line) for line in raw.split('\n')]
 
-        # 3. Unir todo en un blob
         blob = ' '.join(lines)
 
-        # 4. Insertar separadores sintéticos antes de keywords de bloque
-        #    que en RAPID no llevan ';' (MODULE, ENDMODULE, PROC, ENDPROC)
-        #    Usamos ';' como separador universal interno.
         block_keywords = [
             r'\bMODULE\b', r'\bENDMODULE\b', r'\bPROC\b', r'\bENDPROC\b',
             r'\bCONST\b', r'\bVAR\b', r'\bPERS\b', r'\bLOCAL\b',
@@ -110,10 +74,8 @@ class RapidParser:
                 flags=re.IGNORECASE
             )
 
-        # 5. Separar por ';'
         statements = blob.split(';')
 
-        # 6. Limpiar cada sentencia
         clean: List[str] = []
         for stmt in statements:
             s = ' '.join(stmt.split())     # colapsar whitespace
@@ -122,29 +84,22 @@ class RapidParser:
                 clean.append(s)
         return clean
 
-    # ------------------------------------------------------------------
-    #  Paso 2 – Parsear declaraciones y body
-    # ------------------------------------------------------------------
     def _classify_statements(self, statements: List[str]):
-        """Clasifica cada sentencia como declaración, inicio/fin de bloque,
-           o instrucción de cuerpo."""
+        
         current_proc: Optional[str] = None
         proc_body: List[str] = []
 
         for stmt in statements:
             upper = stmt.upper().lstrip()
 
-            # MODULE
             m = re.match(r'MODULE\s+(\w+)', stmt, re.IGNORECASE)
             if m:
                 self.module_name = m.group(1)
                 continue
 
-            # ENDMODULE
             if upper.startswith('ENDMODULE'):
                 continue
 
-            # CONST / VAR / PERS  (declaración de target)
             m = re.match(
                 r'(?:CONST|VAR|PERS|LOCAL\s+CONST|LOCAL\s+VAR|LOCAL\s+PERS)'
                 r'\s+(jointtarget|robtarget|tooldata|wobjdata|speeddata|zonedata|num|bool|string)\s+'
@@ -158,20 +113,18 @@ class RapidParser:
                 self._store_target(dtype, name, value)
                 continue
 
-            # PROC
             m = re.match(r'PROC\s+(\w+)\s*\(', stmt, re.IGNORECASE)
             if m:
                 current_proc = m.group(1).lower()
                 proc_body = []
                 continue
-            # PROC sin paréntesis  (PROC main)
+
             m = re.match(r'PROC\s+(\w+)', stmt, re.IGNORECASE)
             if m and current_proc is None:
                 current_proc = m.group(1).lower()
                 proc_body = []
                 continue
 
-            # ENDPROC
             if upper.startswith('ENDPROC'):
                 if current_proc is not None:
                     self.procedures[current_proc] = proc_body
@@ -179,21 +132,14 @@ class RapidParser:
                     proc_body = []
                 continue
 
-            # Instrucción dentro de un PROC
             if current_proc is not None:
                 proc_body.append(stmt)
-            # Si no estamos en un PROC, podría ser una declaración inline
-            # (ya manejada arriba) o algo que ignoramos
 
-        # Si un PROC no se cerró correctamente, guardarlo igualmente
         if current_proc is not None and proc_body:
             self.procedures[current_proc] = proc_body
 
-    # ------------------------------------------------------------------
-    #  Almacenar target (jointtarget / robtarget)
-    # ------------------------------------------------------------------
     def _store_target(self, dtype: str, name: str, value_str: str):
-        """Parsea y almacena una constante de tipo jointtarget o robtarget."""
+        
         try:
             arrays = _extract_nested_arrays(value_str)
             if dtype == 'jointtarget' and len(arrays) >= 1:
@@ -210,13 +156,10 @@ class RapidParser:
                     "position": position,
                     "quaternion": quaternion
                 }
-            # Otros tipos (tooldata, speeddata, etc.) se ignoran silenciosamente
+
         except Exception as e:
             self.warnings.append(f"No se pudo parsear '{name}': {e}")
 
-    # ------------------------------------------------------------------
-    #  Paso 3 – Convertir instrucciones en movimientos
-    # ------------------------------------------------------------------
     def _parse_movements(self, body: List[str]) -> List[Dict[str, Any]]:
         movements: List[Dict[str, Any]] = []
 
@@ -227,7 +170,7 @@ class RapidParser:
         return movements
 
     def _try_parse_movement(self, stmt: str) -> Optional[Dict[str, Any]]:
-        """Intenta parsear una sentencia como un movimiento."""
+        
         upper = stmt.upper().lstrip()
 
         if upper.startswith('MOVEABSJ'):
@@ -238,19 +181,17 @@ class RapidParser:
             return self._parse_movel(stmt)
         if upper.startswith('MOVEC'):
             return self._parse_movec(stmt)
-        # Instrucciones no-movimiento:  WaitTime, SetDO, TPWrite, etc.
-        # Se ignoran sin error.
+
         return None
 
-    # ---------- MoveAbsJ ----------
     def _parse_moveabsj(self, stmt: str) -> Optional[Dict[str, Any]]:
-        """MoveAbsJ target[\\NoEOffs], speed, zone, tool[\\Wobj:=...];"""
+        
         try:
-            # Quitar el nombre de la instrucción
+
             rest = re.sub(r'^MoveAbsJ\s+', '', stmt, flags=re.IGNORECASE).strip()
-            # Quitar modificadores opcionales  (\NoEOffs, \Wobj:=..., etc.)
+
             rest = re.sub(r'\\{1,2}[A-Za-z]\w*(?::=[^\s,]*)?', '', rest)
-            # Separar tokens por coma
+
             tokens = [t.strip() for t in rest.split(',') if t.strip()]
 
             if not tokens:
@@ -286,7 +227,6 @@ class RapidParser:
             self.warnings.append(f"Error en MoveAbsJ: {e}")
             return None
 
-    # ---------- MoveJ ----------
     def _parse_movej(self, stmt: str) -> Optional[Dict[str, Any]]:
         try:
             rest = re.sub(r'^MoveJ\s+', '', stmt, flags=re.IGNORECASE).strip()
@@ -320,7 +260,6 @@ class RapidParser:
             self.warnings.append(f"Error en MoveJ: {e}")
             return None
 
-    # ---------- MoveL ----------
     def _parse_movel(self, stmt: str) -> Optional[Dict[str, Any]]:
         try:
             rest = re.sub(r'^MoveL\s+', '', stmt, flags=re.IGNORECASE).strip()
@@ -351,14 +290,12 @@ class RapidParser:
             self.warnings.append(f"Error en MoveL: {e}")
             return None
 
-    # ---------- MoveC ----------
     def _parse_movec(self, stmt: str) -> Optional[Dict[str, Any]]:
         try:
             rest = re.sub(r'^MoveC\s+', '', stmt, flags=re.IGNORECASE).strip()
             rest = re.sub(r'\\{1,2}[A-Za-z]\w*(?::=[^\s,]*)?', '', rest)
             tokens = [t.strip() for t in rest.split(',') if t.strip()]
 
-            # MoveC necesita al menos 2 targets: via_point, to_point
             if len(tokens) < 2:
                 return None
 
@@ -389,11 +326,8 @@ class RapidParser:
             self.warnings.append(f"Error en MoveC: {e}")
             return None
 
-    # ------------------------------------------------------------------
-    #  Helpers para extraer speed / zone de tokens
-    # ------------------------------------------------------------------
     def _find_speed(self, tokens: List[str]) -> str:
-        """Busca un token de velocidad como v100, v1000, vmax (case-insensitive)."""
+        
         for t in tokens:
             m = re.match(r'^(v\d+|vmax)$', t, re.IGNORECASE)
             if m:
@@ -401,7 +335,7 @@ class RapidParser:
         return "v1000"
 
     def _find_zone(self, tokens: List[str]) -> str:
-        """Busca un token de zona como fine, z1, z5, z10, z50, z100, z200."""
+        
         for t in tokens:
             tl = t.lower()
             if tl == 'fine':
@@ -411,28 +345,22 @@ class RapidParser:
                 return tl
         return "fine"
 
-    # ------------------------------------------------------------------
-    #  Punto de entrada público
-    # ------------------------------------------------------------------
     def parse(self, rapid_code: str) -> Dict[str, Any]:
-        """Parsea código RAPID y retorna estructura ejecutable."""
+        
         self.targets = {}
         self.procedures = {}
         self.module_name = "Unknown"
         self.warnings = []
 
-        # Paso 1: Pre-procesar
         statements = self._preprocess(rapid_code)
 
-        # Paso 2: Clasificar sentencias
         self._classify_statements(statements)
 
-        # Paso 3: Generar lista de movimientos desde "main"
         movements: List[Dict[str, Any]] = []
         if 'main' in self.procedures:
             movements = self._parse_movements(self.procedures['main'])
         else:
-            # Tal vez el único PROC no se llama main
+
             for proc_name, body in self.procedures.items():
                 movements = self._parse_movements(body)
                 if movements:
@@ -451,12 +379,7 @@ class RapidParser:
             "warnings": self.warnings
         }
 
-
-# ---------------------------------------------------------------------------
-#  API pública
-# ---------------------------------------------------------------------------
-
 def parse_rapid_code(rapid_code: str) -> Dict[str, Any]:
-    """Función principal para parsear código RAPID."""
+    
     parser = RapidParser()
     return parser.parse(rapid_code)

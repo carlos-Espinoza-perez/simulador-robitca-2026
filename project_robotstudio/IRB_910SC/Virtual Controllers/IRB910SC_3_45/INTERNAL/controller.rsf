@@ -1,0 +1,14 @@
+﻿<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<ProductSettings version="1.0">
+  <Products>
+    <Product name="RobotWare" version="6.16.3007" id="abb.robotics.robotware">
+      <Settings>
+        <Setting id="abb.robotics.robotware.base" displayName="RobotWare Base" robot="1" />
+        <Setting id="abb.robotics.robotware.languages.english" displayName="English" robot="1" />
+        <Setting id="abb.robotics.robotware.options.movepnp" displayName="Move Pick and Place" robot="1" />
+        <Setting id="abb.robotics.robotware.drivesystems.drive.dc430a1.du430a1.dm430a" displayName="Drive System IRB 120/140/260/360/910SC/1200/1400/1520/1600/1660ID IRC5 Compact" robot="1" />
+        <Setting id="abb.robotics.robotware.robots.irb910sc.3-0_45" displayName="IRB 910SC-3/0.45" robot="1" />
+      </Settings>
+    </Product>
+  </Products>
+</ProductSettings>

@@ -2,9 +2,7 @@ import numpy as np
 import math
 
 def matriz_dh(theta, d, a, alpha):
-    """
-    Calcula la Matriz de Transformación Homogénea 4x4 según la convención Denavit-Hartenberg.
-    """
+    
     ct = np.cos(theta)
     st = np.sin(theta)
     ca = np.cos(alpha)
@@ -18,19 +16,9 @@ def matriz_dh(theta, d, a, alpha):
     ])
 
 def cinematica_directa(angulos, tabla_dh=None, tipos_articulaciones=None):
-    """
-    Calcula la Cinemática Directa general usando parámetros DH.
     
-    Args:
-        angulos: Lista de N ángulos en grados (o desplazamientos en mm para prismáticas)
-        tabla_dh: Lista de parámetros DH [theta, d, a, alpha]
-        tipos_articulaciones: Lista de 'R' (rotacional) o 'P' (prismática)
-    Returns:
-        T_final: Matriz de transformación 4x4 final (Efector / TCP)
-        transforms: Lista de las N matrices intermedias
-    """
     if tabla_dh is None:
-        # Fallback a IRB 140 por compatibilidad con scripts viejos (ej. generar_workspace.py)
+
         tabla_dh = [
             [0, 352.0, 0.0, 0.0],
             [0, 0.0, 360.0, 0.0],
@@ -54,18 +42,12 @@ def cinematica_directa(angulos, tabla_dh=None, tipos_articulaciones=None):
         
         tipo = tipos_articulaciones[i]
         if tipo == "R":
-            # Articulación rotacional: sumamos el ángulo al theta base
-            # Convertir el valor que viene en "grados" a radianes y sumar
-            # Pero dh[0] está en grados en la tabla_dh de especificaciones_robot.py
+
             theta = np.radians(dh[0] + val)
-            
-            # IRB 140 Legacy Support: Si no pasaron tabla_dh y i==1, a veces se restan 90 grados
-            # Para evitar complicar, confiamos en tabla_dh puramente, pero en IRB140 viejo:
-            # J2=q[1]-pi_2. No lo aplicamos globalmente si pasamos tabla_dh correcto.
-            
+
             d = dh[1]
         elif tipo == "P":
-            # Articulación prismática: sumamos el valor a d base
+
             theta = np.radians(dh[0])
             d = dh[1] + val
         else:
@@ -74,8 +56,7 @@ def cinematica_directa(angulos, tabla_dh=None, tipos_articulaciones=None):
             
         a = dh[2]
         alpha = np.radians(dh[3])
-        
-        # IRB 140 Legacy Support hardcodeado solo si tabla_dh es el exacto por defecto
+
         if num_joints == 6 and tabla_dh[0][1] == 352.0 and i == 0: alpha = -pi_2
         if num_joints == 6 and tabla_dh[0][1] == 352.0 and i == 1: theta -= pi_2
         if num_joints == 6 and tabla_dh[0][1] == 352.0 and i == 2: alpha = -pi_2; dh[2] = 0.0
@@ -89,15 +70,11 @@ def cinematica_directa(angulos, tabla_dh=None, tipos_articulaciones=None):
     T_final = transforms[-1] if transforms else np.eye(4)
     return T_final, transforms
 
-
 def obtener_posicion_efector(T):
-    """
-    Extrae la posición y rotación de una matriz homogénea 4x4.
-    """
+    
     posicion = T[:3, 3]
     rotacion = T[:3, :3]
-    
-    # Redondeo a 3 decimales para evitar ruido de punto flotante en la API (ej. 1.000000000001e-16)
+
     return {
         "posicion": np.round(posicion, 3).tolist(),
         "matriz_rotacion": np.round(rotacion, 5).tolist(),
@@ -106,14 +83,10 @@ def obtener_posicion_efector(T):
         "z": round(float(posicion[2]), 3)
     }
 
-
 def matriz_a_euler(R):
-    """
-    Convierte una matriz de rotación 3x3 a ángulos de Euler (Roll, Pitch, Yaw).
-    """
-    sy = np.sqrt(R[0, 0]**2 + R[1, 0]**2)
     
-    # Singularidad (Gimbal Lock) cuando Pitch es +/- 90 grados
+    sy = np.sqrt(R[0, 0]**2 + R[1, 0]**2)
+
     if sy > 1e-6:
         roll = np.arctan2(R[2, 1], R[2, 2])
         pitch = np.arctan2(-R[2, 0], sy)
@@ -125,12 +98,8 @@ def matriz_a_euler(R):
     
     return (np.degrees(roll), np.degrees(pitch), np.degrees(yaw))
 
-
 def matriz_a_cuaternion(R):
-    """
-    Convierte una matriz de rotación 3x3 a Cuaternión.
-    Formato de salida: (w, x, y, z) -> w es la parte real (q1 en RobotStudio)
-    """
+    
     trace = np.trace(R)
     
     if trace > 0:
@@ -159,6 +128,5 @@ def matriz_a_cuaternion(R):
         z = 0.25 * s
     
     norm = np.sqrt(w**2 + x**2 + y**2 + z**2)
-    
-    # Redondeo para sanear la salida JSON hacia el frontend
+
     return (round(w/norm, 5), round(x/norm, 5), round(y/norm, 5), round(z/norm, 5))

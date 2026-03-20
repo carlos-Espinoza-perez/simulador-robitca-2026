@@ -1,8 +1,4 @@
-"""
-Configuración de robots disponibles en el simulador.
-"""
 
-# Extracción de offset visual (centrado estético en la grilla para IRB140 original)
 DX_IRB140 = 0.247
 DY_IRB140 = 0.203
 
@@ -14,7 +10,7 @@ ROBOTS = {
         "tipos_articulaciones": ["R", "R", "R", "R", "R", "R"],  # R = Rotacional, P = Prismática
         
         "tabla_dh": [
-            # [theta, d, a, alpha]
+
             [0, 352, 0, 0],       # Modificado de original para uniformidad, usa -90 en alpha internamente en IK
             [0, 0, 360, 0],
             [0, 0, 70, -90],

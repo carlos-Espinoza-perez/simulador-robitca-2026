@@ -1,13 +1,9 @@
-"""
-Cinemática Inversa para el simulador
-Adaptado del digital twin del IRB 140
-"""
+
 
 import numpy as np
 
-
 def transform_robotstudio_to_robot_rotated(position, quaternion=None):
-    # Enviar coordenadas directamente
+
     position_robot = list(position)
     
     if quaternion is not None and len(quaternion) == 4:
@@ -16,13 +12,11 @@ def transform_robotstudio_to_robot_rotated(position, quaternion=None):
     
     return position_robot, None
 
-
 def transform_robotstudio_to_threejs(position, quaternion=None):
     from scipy.spatial.transform import Rotation
     
     x_abb, y_abb, z_abb = position
-    
-    # Transformación correcta basada en el sistema DH
+
     x_dh = -y_abb  # Izquierda ABB → -Lateral DH
     y_dh = x_abb   # Frente ABB → Frente DH (brazo extendido)
     z_dh = z_abb   # Arriba ABB → Arriba DH
@@ -37,7 +31,6 @@ def transform_robotstudio_to_threejs(position, quaternion=None):
         return position_three, quaternion_three
     
     return position_three
-
 
 def transform_threejs_to_robotstudio(position, quaternion=None):
     x_three, y_three, z_three = position
@@ -58,11 +51,8 @@ def transform_threejs_to_robotstudio(position, quaternion=None):
     
     return position_abb
 
-
 def dh_transform(theta, d, a, alpha):
-    """
-    Matriz de Transformación Homogénea de Denavit-Hartenberg (DH estándar).
-    """
+    
     ct = np.cos(theta)
     st = np.sin(theta)
     ca = np.cos(alpha)
@@ -75,22 +65,16 @@ def dh_transform(theta, d, a, alpha):
         [ 0,      0,      0,    1]
     ])
 
-
 def quaternion_to_rotation_matrix(q):
-    """
-    Convierte un cuaternión [qw, qx, qy, qz] o [qx, qy, qz, qw] a matriz de rotación 3x3.
-    RAPID usa formato: [q1, q2, q3, q4] donde q1 es la parte real (w).
-    """
+    
     if len(q) == 4:
         qw, qx, qy, qz = q
     else:
         raise ValueError("Cuaternión debe tener 4 elementos")
-    
-    # Normalizar
+
     norm = np.sqrt(qw**2 + qx**2 + qy**2 + qz**2)
     qw, qx, qy, qz = qw/norm, qx/norm, qy/norm, qz/norm
-    
-    # Construir matriz de rotación
+
     R = np.array([
         [1 - 2*(qy**2 + qz**2), 2*(qx*qy - qw*qz), 2*(qx*qz + qw*qy)],
         [2*(qx*qy + qw*qz), 1 - 2*(qx**2 + qz**2), 2*(qy*qz - qw*qx)],
@@ -98,7 +82,6 @@ def quaternion_to_rotation_matrix(q):
     ])
     
     return R
-
 
 def apply_axis_angle(vec, axis, angle):
 
@@ -115,8 +98,6 @@ def apply_axis_angle(vec, axis, angle):
 def get_visual_R0_3(j1_deg, j2_abb, j3_abb):
 
     import math
-
-    # Posición inicial de ejes
 
     axes = [
 
@@ -138,8 +119,6 @@ def get_visual_R0_3(j1_deg, j2_abb, j3_abb):
 
     ]
 
-   
-
     q = [math.radians(j1_deg), math.radians(j2_abb), math.radians(j3_abb)]
 
     for j in range(3):
@@ -156,8 +135,6 @@ def get_visual_R0_3(j1_deg, j2_abb, j3_abb):
 
             wrist_axes[w] = apply_axis_angle(wrist_axes[w], axis, ang)
 
-           
-
     X_local = wrist_axes[0]
 
     Y_local = wrist_axes[1]
@@ -167,12 +144,7 @@ def get_visual_R0_3(j1_deg, j2_abb, j3_abb):
     return np.column_stack((X_local, Y_local, Z_local))
 
 def inverse_kinematics_irb140(position, quaternion):
-    """
-    Cinemática Inversa Analítica para el ABB IRB 140.
-    Mantiene la orientación visual original para Three.js, pero corrige
-    las medidas geométricas para eliminar el desfase de 5.4 mm.
-    """
-    # 1. LAS MEDIDAS REALES (Aquí estaba el origen del desfase)
+
     d1 = 352.0  
     a1 = 70.0   # CORRECCIÓN 1: Agregamos el offset del hombro
     a2 = 360.0  # CORRECCIÓN 2: Brazo real (antes 280.0)
@@ -189,22 +161,18 @@ def inverse_kinematics_irb140(position, quaternion):
         ])
         R = R_orig @ R_align_T
         P = np.array(position)
-        
-        # Calcular el centro de la muñeca (Pw)
+
         Pw = P - d6 * R[:, 0]
         xc, yc, zc = Pw[0], Pw[1], Pw[2]
-        
-        # Solución para q1 
+
         q1 = np.arctan2(yc, xc)
-        
-        # CORRECCIÓN 4: Restar el offset del hombro (a1) a la distancia radial
+
         r = np.sqrt(xc**2 + yc**2) - a1 
         s = zc - d1
         
         D2 = r**2 + s**2
         D = np.sqrt(D2)
-        
-        # L3 ahora es directamente d4 porque a3 es 0
+
         L3 = d4 
         
         max_reach = a2 + L3
@@ -223,8 +191,7 @@ def inverse_kinematics_irb140(position, quaternion):
         cos_beta = np.clip(cos_beta, -1.0, 1.0)
         beta = np.arccos(cos_beta)
         q2 = alpha + beta
-        
-        # Convertir a grados ABB para buscar el R0_3 correcto
+
         q1_deg = np.degrees(q1)
         q2_geom_deg = np.degrees(q2)
         gamma_deg = np.degrees(gamma)
@@ -232,12 +199,10 @@ def inverse_kinematics_irb140(position, quaternion):
         j1_abb = q1_deg
         j2_abb = 90.0 - q2_geom_deg
         j3_abb = 90.0 - gamma_deg
-        
-        # USAMOS TU FUNCIÓN VISUAL ORIGINAL (Esto arregla que el robot se vuelva loco)
+
         R0_3 = get_visual_R0_3(j1_abb, j2_abb, j3_abb)
         R3_6 = R0_3.T @ R
-        
-        # Extraer muñeca esférica
+
         q5_rad = np.arccos(np.clip(R3_6[0, 0], -1.0, 1.0))
         
         if np.abs(np.sin(q5_rad)) > 1e-6:
@@ -269,34 +234,8 @@ def validate_joint_limits(joints, limits):
     
     return True, "OK"
 
-
-# ============================================================
-# IK Analítico para SCARA (ABB IRB 910SC) - 4 GDL
-# ============================================================
-
 def inverse_kinematics_scara(position, quaternion):
-    """
-    Cinemática Inversa Analítica para el ABB IRB 910SC (SCARA).
-    
-    Parámetros DH del SCARA:
-        J1 (R): d1=200mm, a1=250mm, α=0°
-        J2 (R): d2=0,     a2=200mm, α=180°
-        J3 (P): d3=q3,    a3=0,     α=0°
-        J4 (R): d4=0,     a4=0,     α=0°
-    
-    FK resultado:
-        x = a1*cos(q1) + a2*cos(q1+q2)
-        y = a1*sin(q1) + a2*sin(q1+q2)
-        z = d1 - q3  (α2=180° invierte eje Z para el prismatico)
-    
-    Args:
-        position: [x, y, z] en mm (coordenadas del TCP)
-        quaternion: [qw, qx, qy, qz] (orientación, se extrae rotación Z)
-    
-    Returns:
-        np.array([q1_deg, q2_deg, q3_mm, q4_deg]) o None si no hay solución
-    """
-    # Parámetros geométricos del SCARA
+
     a1 = 250.0   # Longitud brazo 1 (mm)
     a2 = 200.0   # Longitud brazo 2 (mm)
     d1 = 200.0   # Altura base (mm)
@@ -305,18 +244,15 @@ def inverse_kinematics_scara(position, quaternion):
     x, y, z = position[0], position[1], position[2]
     
     try:
-        # FK es: z = d1 - (d3 + q3)  (porque alpha2 es 180 grados, el eje Z se invierte)
-        # Despejando: q3 = d1 - d3 - z
+
         q3 = d1 - d3 - z
-        
-        # q3 es el desplazamiento prismático que debe estar teóricamente entre 0 y 150mm
+
         if q3 < -5.0 or q3 > 155.0:  # Margen de tolerancia  
             max_z = d1 - d3  # El z más alto que puede alcanzar (cuando q3 = 0 -> 200-100 = 100mm)
             min_z = d1 - d3 - 150.0 # El z más bajo (cuando q3 = max alcance 150 -> 200-100-150 = -50mm)
             print(f"⚠️ SCARA IK: Altura Z={z:.2f}mm inalcanzable. Rango válido Z es [{min_z}, {max_z}]mm")
             return None
-        
-        # ── J2 (Codo): Ley de cosenos ──
+
         r_sq = x**2 + y**2
         r = np.sqrt(r_sq)
         
@@ -327,31 +263,23 @@ def inverse_kinematics_scara(position, quaternion):
             return None
         
         cos_q2 = np.clip(cos_q2, -1.0, 1.0)
-        
-        # Elegir configuración "codo arriba" (elbow-up) por defecto
+
         sin_q2 = -np.sqrt(1 - cos_q2**2)  # Negativo = codo derecho (más natural en SCARA)
         q2 = np.arctan2(sin_q2, cos_q2)
-        
-        # ── J1 (Hombro): Geometría planar ──
+
         k1 = a1 + a2 * cos_q2
         k2 = a2 * sin_q2
         q1 = np.arctan2(y, x) - np.arctan2(k2, k1)
-        
-        # ── J4 (Muñeca): Rotación Z del TCP ──
-        # Extraer la rotación total en Z del cuaternión
-        # RAPID quaternion: [qw, qx, qy, qz]
+
         if quaternion is not None and len(quaternion) >= 4:
             qw, qx, qy, qz = quaternion[0], quaternion[1], quaternion[2], quaternion[3]
-            # Para SCARA la orientación es puramente en Z
-            # φ_total = atan2(2*(qw*qz + qx*qy), 1 - 2*(qy² + qz²))
+
             phi_total = np.arctan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy**2 + qz**2))
         else:
             phi_total = 0.0
-        
-        # La rotación Z total del TCP = q1 + q2 + q4
+
         q4 = phi_total - q1 - q2
-        
-        # Convertir a grados (J3 se queda en mm)
+
         q1_deg = np.degrees(q1)
         q2_deg = np.degrees(q2)
         q3_mm = q3  # Prismático: ya está en mm
@@ -365,18 +293,8 @@ def inverse_kinematics_scara(position, quaternion):
         traceback.print_exc()
         return None
 
-
-# ============================================================
-# Router principal de IK
-# ============================================================
-
 def solve_ik_from_robtarget(position, quaternion, robot_limits, from_robotstudio=False, robot_id="ABB_IRB_140"):
-    """
-    Resuelve IK para cualquier robot soportado.
-    Enruta al solver analítico correcto según robot_id.
-    """
-    
-    # ── Transformación de coordenadas ──
+
     if from_robotstudio:
         position_transformed, quaternion_transformed = transform_robotstudio_to_robot_rotated(
             position, quaternion
@@ -387,16 +305,14 @@ def solve_ik_from_robtarget(position, quaternion, robot_limits, from_robotstudio
     
     if quaternion_transformed is None:
         quaternion_transformed = quaternion
-    
-    # ── Enrutar al solver correcto ──
+
     if robot_id == "ABB_IRB_910SC":
         return _solve_ik_scara(position_transformed, quaternion_transformed, robot_limits)
     else:
         return _solve_ik_irb140(position_transformed, quaternion_transformed, robot_limits)
 
-
 def _solve_ik_scara(position, quaternion, robot_limits):
-    """Wrapper IK para el ABB IRB 910SC (SCARA)."""
+    
     joints = inverse_kinematics_scara(position, quaternion)
     
     if joints is None:
@@ -428,9 +344,8 @@ def _solve_ik_scara(position, quaternion, robot_limits):
         "error_detail": None
     }
 
-
 def _solve_ik_irb140(position, quaternion, robot_limits):
-    """Wrapper IK para el ABB IRB 140."""
+    
     joints = inverse_kinematics_irb140(position, quaternion)
     
     if joints is None:

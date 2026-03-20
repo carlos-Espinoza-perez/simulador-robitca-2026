@@ -1,9 +1,11 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 import numpy as np
 import os
 import json
+import zipfile
+import io
 from datetime import datetime
 
 from especificaciones_robot import ROBOTS
@@ -41,7 +43,6 @@ tabla_dh = robot["tabla_dh"]
 limites = robot["limites_articulares"]
 tipos_articulaciones = robot.get("tipos_articulaciones", ["R"] * robot["grados_libertad"])
 
-
 def calcular_estado(angulos):
     try:
         T_final, transformaciones = cinematica_directa(angulos, tabla_dh, tipos_articulaciones)
@@ -68,11 +69,9 @@ def calcular_estado(angulos):
     except Exception as e:
         return {"success": False, "error": str(e)}
 
-
 def quat_dict_to_list(quat_dict):
-    """Convierte cuaternión de dict a lista [x, y, z, w]"""
+    
     return [quat_dict['x'], quat_dict['y'], quat_dict['z'], quat_dict['w']]
-
 
 def validar_limites(angulos):
     for i, angulo in enumerate(angulos):
@@ -81,7 +80,6 @@ def validar_limites(angulos):
             return False, f"Eje {i+1}: {angulo}° fuera de límites [{min_lim}°, {max_lim}°]"
     return True, "OK"
 
-
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({
@@ -89,7 +87,6 @@ def health():
         "robot": robot["nombre"],
         "clientes": estado_robot["clientes_conectados"]
     })
-
 
 @app.route('/api/robots/lista', methods=['GET'])
 def lista_robots():
@@ -106,7 +103,6 @@ def lista_robots():
         "robots": robots_disponibles,
         "robot_actual": estado_robot["robot_actual"]
     })
-
 
 @app.route('/api/robot/seleccionar', methods=['POST'])
 def seleccionar_robot():
@@ -145,7 +141,6 @@ def seleccionar_robot():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
-
 @app.route('/api/robot/info', methods=['GET'])
 def info_robot():
     return jsonify({
@@ -153,12 +148,10 @@ def info_robot():
         "robot": robot
     })
 
-
 @app.route('/api/robot/estado', methods=['GET'])
 def estado():
     estado_actual = calcular_estado(estado_robot["angulos"])
-    
-    # Agregar análisis de singularidades con manejo de errores
+
     try:
         analisis = analisis_completo(
             [np.rad2deg(a) for a in estado_robot["angulos"]], 
@@ -173,17 +166,13 @@ def estado():
     
     return jsonify(estado_actual)
 
-
 @app.route('/api/robot/analisis', methods=['POST'])
 def analizar_configuracion():
-    """
-    Analiza singularidades para una configuración específica
-    """
+    
     try:
         data = request.get_json()
         joints_deg = data.get('joints', estado_robot["angulos"])
-        
-        # Convertir a grados si vienen en radianes
+
         if all(abs(j) < 10 for j in joints_deg):  # Probablemente radianes
             joints_deg = [np.rad2deg(j) for j in joints_deg]
         
@@ -205,7 +194,6 @@ def analizar_configuracion():
             "success": False,
             "error": str(e)
         }), 500
-
 
 @app.route('/api/robot/mover', methods=['POST'])
 def mover():
@@ -238,7 +226,6 @@ def mover():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
-
 @app.route('/api/robot/home', methods=['POST'])
 def home():
     n_articulaciones = robot["grados_libertad"]
@@ -253,7 +240,6 @@ def home():
     })
     
     return jsonify(estado)
-
 
 @app.route('/api/cinematica/directa', methods=['POST'])
 def cinematica():
@@ -273,12 +259,9 @@ def cinematica():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
-
 @app.route('/api/rapid/parse', methods=['POST'])
 def parse_rapid():
-    """
-    Parsea código RAPID y retorna una lista de movimientos
-    """
+    
     try:
         data = request.get_json()
         rapid_code = data.get('code')
@@ -288,8 +271,7 @@ def parse_rapid():
                 "success": False,
                 "error": "No se proporcionó código RAPID"
             }), 400
-        
-        # Parsear código RAPID
+
         result = parse_rapid_code(rapid_code)
         
         if not result.get('success'):
@@ -306,13 +288,9 @@ def parse_rapid():
             "error": f"Error al procesar código RAPID: {str(e)}"
         }), 500
 
-
 @app.route('/api/rapid/execute', methods=['POST'])
 def execute_rapid():
-    """
-    Ejecuta un programa RAPID paso a paso
-    Retorna la lista completa de movimientos con cinemática calculada
-    """
+    
     try:
         data = request.get_json()
         rapid_code = data.get('code')
@@ -322,8 +300,7 @@ def execute_rapid():
                 "success": False,
                 "error": "No se proporcionó código RAPID"
             }), 400
-        
-        # Parsear código RAPID
+
         parsed = parse_rapid_code(rapid_code)
         
         if not parsed.get('success'):
@@ -333,8 +310,7 @@ def execute_rapid():
             }), 400
         
         movements = parsed.get('movements', [])
-        
-        # Procesar cada movimiento y calcular cinemática
+
         processed_movements = []
         
         for i, movement in enumerate(movements):
@@ -345,22 +321,20 @@ def execute_rapid():
                 "speed": movement.get('speed', 'v1000'),
                 "zone": movement.get('zone', 'fine'),
             }
-            
-            # Procesar según tipo de movimiento
+
             if movement['type'] in ['MoveAbsJ', 'MoveJ']:
-                # Movimiento de articulaciones
+
                 if 'joints' in movement:
                     joints = movement['joints']
                     movement_data['joints'] = joints
-                    
-                    # Calcular cinemática directa
+
                     estado = calcular_estado(joints)
                     if estado.get('success'):
                         movement_data['position'] = estado['posicion']
                         movement_data['orientation'] = estado['orientacion']
                     
                 elif movement.get('target_type') == 'cartesian':
-                    # Movimiento cartesiano - usar cinemática inversa
+
                     cart_data = movement['data']
                     position = cart_data['position']
                     quaternion = cart_data['quaternion']
@@ -371,15 +345,13 @@ def execute_rapid():
                         'z': position[2]
                     }
                     movement_data['quaternion'] = quaternion
-                    
-                    # Resolver cinemática inversa
+
                     ik_result = solve_ik_from_robtarget(position, quaternion, limites, from_robotstudio=True, robot_id=estado_robot["robot_actual"])
                     
                     if ik_result['success']:
                         movement_data['joints'] = ik_result['joints']
                         movement_data['ik_message'] = ik_result['message']
-                        
-                        # Calcular cinemática directa para verificar
+
                         estado = calcular_estado(ik_result['joints'])
                         if estado.get('success'):
                             movement_data['orientation'] = estado['orientacion']
@@ -388,7 +360,7 @@ def execute_rapid():
                         movement_data['warning'] = 'Cinemática inversa falló'
                     
             elif movement['type'] == 'MoveL':
-                # Movimiento lineal cartesiano
+
                 if movement.get('target_type') == 'cartesian':
                     cart_data = movement['data']
                     position = cart_data['position']
@@ -400,15 +372,13 @@ def execute_rapid():
                         'z': position[2]
                     }
                     movement_data['quaternion'] = quaternion
-                    
-                    # Resolver cinemática inversa
+
                     ik_result = solve_ik_from_robtarget(position, quaternion, limites, from_robotstudio=True, robot_id=estado_robot["robot_actual"])
                     
                     if ik_result['success']:
                         movement_data['joints'] = ik_result['joints']
                         movement_data['ik_message'] = ik_result['message']
-                        
-                        # Calcular cinemática directa para verificar
+
                         estado = calcular_estado(ik_result['joints'])
                         if estado.get('success'):
                             movement_data['orientation'] = estado['orientacion']
@@ -417,7 +387,7 @@ def execute_rapid():
                         movement_data['warning'] = 'Cinemática inversa falló'
                     
             elif movement['type'] == 'MoveC':
-                # Movimiento circular
+
                 via_data = movement['via_data']
                 to_data = movement['to_data']
                 
@@ -433,8 +403,7 @@ def execute_rapid():
                     'y': to_data['position'][1],
                     'z': to_data['position'][2]
                 }
-                # TODO: Generar puntos intermedios del arco
-            
+
             processed_movements.append(movement_data)
         
         return jsonify({
@@ -451,13 +420,9 @@ def execute_rapid():
             "error": f"Error al ejecutar código RAPID: {str(e)}"
         }), 500
 
-
 @app.route('/api/rapid/interpolate', methods=['POST'])
 def interpolate_rapid():
-    """
-    Genera trayectorias interpoladas para movimientos suaves
-    Retorna lista expandida con puntos intermedios
-    """
+    
     try:
         data = request.get_json()
         rapid_code = data.get('code')
@@ -467,8 +432,7 @@ def interpolate_rapid():
                 "success": False,
                 "error": "No se proporcionó código RAPID"
             }), 400
-        
-        # Parsear código RAPID
+
         parsed = parse_rapid_code(rapid_code)
         
         if not parsed.get('success'):
@@ -478,11 +442,9 @@ def interpolate_rapid():
             }), 400
         
         movements = parsed.get('movements', [])
-        
-        # Lista de trayectorias interpoladas
+
         interpolated_trajectory = []
-        
-        # Estado actual (posición inicial)
+
         current_joints = estado_robot["angulos"].copy()
         current_estado = calcular_estado(current_joints)
         current_position = [
@@ -494,17 +456,14 @@ def interpolate_rapid():
         
         for i, movement in enumerate(movements):
             num_pasos = calcular_num_pasos_por_velocidad(movement.get('speed', 'v1000'))
-            
-            # Procesar según tipo de movimiento
+
             if movement['type'] in ['MoveAbsJ', 'MoveJ']:
-                # Movimiento de articulaciones
+
                 if 'joints' in movement:
                     target_joints = movement['joints']
-                    
-                    # Interpolar en espacio de articulaciones
+
                     trayectoria_joints = interpolar_joints(current_joints, target_joints, num_pasos)
-                    
-                    # Convertir cada punto a formato completo
+
                     for j, joints in enumerate(trayectoria_joints):
                         estado = calcular_estado(joints)
                         if estado.get('success'):
@@ -518,8 +477,7 @@ def interpolate_rapid():
                                 "orientation": estado['orientacion'],
                                 "is_intermediate": j < len(trayectoria_joints) - 1
                             })
-                    
-                    # Actualizar estado actual
+
                     current_joints = target_joints
                     current_estado = calcular_estado(current_joints)
                     current_position = [
@@ -530,18 +488,16 @@ def interpolate_rapid():
                     current_quaternion = quat_dict_to_list(current_estado['orientacion']['cuaternion'])
                     
                 elif movement.get('target_type') == 'cartesian':
-                    # Movimiento cartesiano - resolver IK primero
+
                     cart_data = movement['data']
                     target_position = cart_data['position']
                     target_quaternion = cart_data['quaternion']
-                    
-                    # Resolver cinemática inversa
+
                     ik_result = solve_ik_from_robtarget(target_position, target_quaternion, limites, from_robotstudio=True, robot_id=estado_robot["robot_actual"])
                     
                     if ik_result['success']:
                         target_joints = ik_result['joints']
-                        
-                        # Interpolar en espacio de articulaciones
+
                         trayectoria_joints = interpolar_joints(current_joints, target_joints, num_pasos)
                         
                         for j, joints in enumerate(trayectoria_joints):
@@ -562,7 +518,7 @@ def interpolate_rapid():
                         current_position = target_position
                         current_quaternion = target_quaternion
                     else:
-                        # IK falló, agregar solo el punto objetivo
+
                         interpolated_trajectory.append({
                             "step": len(interpolated_trajectory) + 1,
                             "movement_index": i,
@@ -578,20 +534,18 @@ def interpolate_rapid():
                         })
                     
             elif movement['type'] == 'MoveL':
-                # Movimiento lineal cartesiano
+
                 if movement.get('target_type') == 'cartesian':
                     cart_data = movement['data']
                     target_position = cart_data['position']
                     target_quaternion = cart_data['quaternion']
-                    
-                    # Interpolar en espacio cartesiano
+
                     trayectoria_cart = interpolar_lineal_cartesiano(
                         current_position, current_quaternion,
                         target_position, target_quaternion,
                         num_pasos
                     )
-                    
-                    # Resolver IK para cada punto
+
                     for j, pose in enumerate(trayectoria_cart):
                         ik_result = solve_ik_from_robtarget(pose['position'], pose['quaternion'], limites, from_robotstudio=True, robot_id=estado_robot["robot_actual"])
                         
@@ -608,15 +562,14 @@ def interpolate_rapid():
                                     "orientation": estado['orientacion'],
                                     "is_intermediate": j < len(trayectoria_cart) - 1
                                 })
-                    
-                    # Actualizar estado actual
+
                     if ik_result['success']:
                         current_joints = ik_result['joints']
                         current_position = target_position
                         current_quaternion = target_quaternion
                     
             elif movement['type'] == 'MoveC':
-                # Movimiento circular
+
                 via_data = movement['via_data']
                 to_data = movement['to_data']
                 
@@ -624,16 +577,14 @@ def interpolate_rapid():
                 via_quaternion = via_data['quaternion']
                 to_position = to_data['position']
                 to_quaternion = to_data['quaternion']
-                
-                # Interpolar arco circular (mismo número de pasos que movimientos lineales)
+
                 trayectoria_cart = interpolar_circular(
                     current_position, current_quaternion,
                     via_position, via_quaternion,
                     to_position, to_quaternion,
                     num_pasos  # Reducido de num_pasos * 2
                 )
-                
-                # Resolver IK para cada punto
+
                 for j, pose in enumerate(trayectoria_cart):
                     ik_result = solve_ik_from_robtarget(pose['position'], pose['quaternion'], limites, from_robotstudio=True, robot_id=estado_robot["robot_actual"])
                     
@@ -650,8 +601,7 @@ def interpolate_rapid():
                                 "orientation": estado['orientacion'],
                                 "is_intermediate": j < len(trayectoria_cart) - 1
                             })
-                
-                # Actualizar estado actual
+
                 if ik_result['success']:
                     current_joints = ik_result['joints']
                     current_position = to_position
@@ -674,7 +624,6 @@ def interpolate_rapid():
             "error": f"Error al interpolar trayectoria: {str(e)}"
         }), 500
 
-
 @socketio.on('connect')
 def conectar():
     estado_robot["clientes_conectados"] += 1
@@ -687,17 +636,14 @@ def conectar():
         "estado_actual": estado
     })
 
-
 @socketio.on('disconnect')
 def desconectar():
     estado_robot["clientes_conectados"] -= 1
     print(f"✗ Cliente desconectado (Total: {estado_robot['clientes_conectados']})")
 
-
 @socketio.on('solicitar_estado')
 def solicitar_estado():
     emit('estado_robot', calcular_estado(estado_robot["angulos"]))
-
 
 @socketio.on('mover_robot')
 def mover_robot_ws(data):
@@ -725,10 +671,9 @@ def mover_robot_ws(data):
     except Exception as e:
         emit('error', {"mensaje": str(e)})
 
-
 @app.route('/api/robot/workspace', methods=['GET'])
 def get_workspace():
-    """Retorna los puntos del espacio de trabajo pre-calculados."""
+    
     try:
         path = os.path.join(os.getcwd(), 'workspace_points.json')
         if os.path.exists(path):
@@ -747,6 +692,58 @@ def get_workspace():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
+@app.route('/api/rapid/download/<robot_id>', methods=['POST'])
+def download_rapid_project(robot_id: str):
+    
+    FOLDER_MAP = {
+        'ABB_IRB_140':   'IRB_140',
+        'ABB_IRB_910SC': 'IRB_910SC',
+    }
+    MOD_PATH_MAP = {
+        'ABB_IRB_140':   os.path.join('Controller Data', 'IRB140_6_81',  'RAPID', 'TASK1', 'PROGMOD', 'Module1.mod'),
+        'ABB_IRB_910SC': os.path.join('Controller Data', 'IRB910SC_3_45', 'RAPID', 'TASK1', 'PROGMOD', 'Module1.mod'),
+    }
+
+    folder_name = FOLDER_MAP.get(robot_id)
+    if not folder_name:
+        return jsonify({'success': False, 'error': f'Robot no reconocido: {robot_id}'}), 404
+
+    data = request.get_json() or {}
+    rapid_code = data.get('code', '')
+
+    project_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'project_robotstudio', folder_name)
+    project_dir = os.path.normpath(project_dir)
+
+    if not os.path.isdir(project_dir):
+        return jsonify({'success': False, 'error': f'Carpeta no encontrada: {project_dir}'}), 404
+
+    if rapid_code:
+        mod_rel = MOD_PATH_MAP.get(robot_id, '')
+        mod_abs = os.path.join(project_dir, mod_rel)
+        try:
+            os.makedirs(os.path.dirname(mod_abs), exist_ok=True)
+            with open(mod_abs, 'w', encoding='utf-8') as f:
+                f.write(rapid_code)
+        except Exception as e:
+            print(f'[WARN] No se pudo escribir Module1.mod: {e}')
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for root, dirs, files in os.walk(project_dir):
+            for file in files:
+                abs_path = os.path.join(root, file)
+                arcname = os.path.relpath(abs_path, os.path.dirname(project_dir))
+                zf.write(abs_path, arcname)
+    zip_buffer.seek(0)
+
+    zip_name = f'RobotStudio_{folder_name}.zip'
+    return send_file(
+        zip_buffer,
+        mimetype='application/zip',
+        as_attachment=True,
+        download_name=zip_name
+    )
+
 abort_execution_flag = False
 
 @socketio.on('abort_rapid_execution')
@@ -757,10 +754,7 @@ def abort_rapid_execution():
 
 @socketio.on('execute_rapid_stream')
 def execute_rapid_stream(data):
-    """
-    Ejecuta código RAPID con streaming de puntos
-    Envía cada punto conforme se calcula para ejecución inmediata
-    """
+    
     global abort_execution_flag
     abort_execution_flag = False
     
@@ -770,8 +764,7 @@ def execute_rapid_stream(data):
         if not code:
             emit('rapid_error', {"message": "No se proporcionó código RAPID"})
             return
-        
-        # Parsear código RAPID
+
         parsed = parse_rapid_code(code)
         
         if not parsed.get('success'):
@@ -779,8 +772,7 @@ def execute_rapid_stream(data):
             return
         
         movements = parsed.get('movements', [])
-        
-        # Estado actual — recortar a los GDL reales del robot
+
         num_gdl = len(limites)  # GDL reales del robot activo
         current_joints = estado_robot["angulos"][:num_gdl].copy()
         current_estado = calcular_estado(current_joints)
@@ -789,10 +781,9 @@ def execute_rapid_stream(data):
             current_estado['posicion']['y'],
             current_estado['posicion']['z']
         ]
-        # Convertir cuaternión de dict a lista [x, y, z, w]
+
         current_quaternion = quat_dict_to_list(current_estado['orientacion']['cuaternion'])
-        
-        # Variable para rastrear últimos joints analizados (para detectar movimientos pequeños)
+
         last_analyzed_joints = current_joints.copy()
         
         execution_error = False
@@ -803,8 +794,7 @@ def execute_rapid_stream(data):
                 if abort_execution_flag:
                     emit('rapid_error', {"message": "Ejecución detenida por el usuario", "type": "warning"})
                 break
-            
-            # Procesar según tipo de movimiento
+
             if movement['type'] in ['MoveAbsJ', 'MoveJ']:
                 if 'joints' in movement:
                     target_joints = movement['joints'][:num_gdl]  # Recortar RAPID 6-GDL → GDL reales
@@ -825,21 +815,15 @@ def execute_rapid_stream(data):
                         
                         estado = calcular_estado(joints)
                         if estado.get('success'):
-                            # Analizar singularidades en el punto final
+
                             analisis = None
                             is_final_point = (j == len(trayectoria_joints) - 1)
-                            
-                            # Omitir análisis solo para objetivos conocidos como ZERO o HOME
+
                             target_name = str(movement.get('target', '')).upper()
                             es_home_zero = any(name in target_name for name in ['ZERO', 'HOME'])
-                            
-                            # Calcular cambio articular desde el último análisis
+
                             joint_change = np.linalg.norm(np.array(joints) - np.array(last_analyzed_joints))
-                            
-                            # Analizar solo si:
-                            # 1. Es punto final, Y
-                            # 2. El cambio es significativo (> 2°), Y
-                            # 3. No es HOME/ZERO
+
                             should_analyze = (
                                 is_final_point and 
                                 joint_change > 2.0 and 
@@ -850,7 +834,7 @@ def execute_rapid_stream(data):
                                 try:
                                     analisis = analisis_completo(joints, tabla_dh, limites, tipos_articulaciones)
                                     last_analyzed_joints = joints.copy()
-                                    # Emitir advertencia si hay singularidad
+
                                     if analisis and analisis['estado_general'] in ['singular', 'advertencia']:
                                         singularidades_detectadas = analisis['singularidades']['singularidades']
                                         for sing in singularidades_detectadas:
@@ -860,7 +844,7 @@ def execute_rapid_stream(data):
                                             })
                                 except Exception as e:
                                     print(f"⚠ Error en análisis de singularidades: {e}")
-                                    # Continuar sin análisis
+
                             else:
                                 if is_final_point:
                                     last_analyzed_joints = joints.copy()
@@ -882,7 +866,7 @@ def execute_rapid_stream(data):
                             emit('rapid_point', point_data)
                             socketio.sleep(0.05)
                         else:
-                            # Error de límites o cinemática
+
                             execution_error = True
                             emit('rapid_error', {
                                 "message": f"Error de límites en MoveJ (Movimiento {i+1}: {movement['type']} {movement.get('target', '')})",
@@ -909,8 +893,7 @@ def execute_rapid_stream(data):
                     num_pasos = calcular_num_pasos_por_velocidad(movement.get('speed', 'v1000'), dist)
                     
                     ik_result = solve_ik_from_robtarget(target_position, target_quaternion, limites, from_robotstudio=True, robot_id=estado_robot["robot_actual"])
-                    
-                    
+
                     if ik_result['success']:
                         target_joints = ik_result['joints']
                         trayectoria_joints = interpolar_joints(current_joints, target_joints, num_pasos)
@@ -928,11 +911,9 @@ def execute_rapid_stream(data):
                                 
                                 target_name = str(movement.get('target', '')).upper()
                                 es_home_zero = any(name in target_name for name in ['ZERO', 'HOME'])
-                                
-                                # Calcular cambio articular desde el último análisis
+
                                 joint_change = np.linalg.norm(np.array(joints) - np.array(last_analyzed_joints))
-                                
-                                # Analizar solo si el cambio es significativo
+
                                 should_analyze = (
                                     is_final_point and 
                                     joint_change > 2.0 and 
@@ -952,7 +933,7 @@ def execute_rapid_stream(data):
                                                 })
                                     except Exception as e:
                                         print(f"⚠ Error en análisis de singularidades: {e}")
-                                        # Continuar sin análisis
+
                                 else:
                                     if is_final_point:
                                         last_analyzed_joints = joints.copy()
@@ -1006,8 +987,7 @@ def execute_rapid_stream(data):
                         target_position, target_quaternion,
                         num_pasos
                     )
-                    
-                    
+
                     for j, pose in enumerate(trayectoria_cart):
                         if abort_execution_flag:
                             execution_error = True
@@ -1024,11 +1004,9 @@ def execute_rapid_stream(data):
                                 
                                 target_name = str(movement.get('target', '')).upper()
                                 es_home_zero = any(name in target_name for name in ['ZERO', 'HOME'])
-                                
-                                # Calcular cambio articular desde el último análisis
+
                                 joint_change = np.linalg.norm(np.array(ik_result['joints']) - np.array(last_analyzed_joints))
-                                
-                                # Analizar solo si el cambio es significativo
+
                                 should_analyze = (
                                     is_final_point and 
                                     joint_change > 2.0 and 
@@ -1048,7 +1026,7 @@ def execute_rapid_stream(data):
                                                 })
                                     except Exception as e:
                                         print(f"⚠ Error en análisis de singularidades: {e}")
-                                        # Continuar sin análisis
+
                                 else:
                                     if is_final_point:
                                         last_analyzed_joints = ik_result['joints'].copy()
@@ -1100,8 +1078,7 @@ def execute_rapid_stream(data):
                     to_position, to_quaternion,
                     num_pasos
                 )
-                
-                
+
                 for j, pose in enumerate(trayectoria_cart):
                     if abort_execution_flag:
                         execution_error = True
@@ -1118,11 +1095,9 @@ def execute_rapid_stream(data):
                             
                             target_name = f"{movement.get('via_point', '')} -> {movement.get('to_point', '')}".upper()
                             es_home_zero = any(name in target_name for name in ['ZERO', 'HOME'])
-                            
-                            # Calcular cambio articular desde el último análisis
+
                             joint_change = np.linalg.norm(np.array(ik_result['joints']) - np.array(last_analyzed_joints))
-                            
-                            # Analizar solo si el cambio es significativo
+
                             should_analyze = (
                                 is_final_point and 
                                 joint_change > 2.0 and 
@@ -1142,9 +1117,9 @@ def execute_rapid_stream(data):
                                             })
                                 except Exception as e:
                                     print(f"⚠ Error en análisis de singularidades: {e}")
-                                    # Continuar sin análisis
+
                             else:
-                                # Si no se analiza, actualizar la referencia de todos modos
+
                                 if is_final_point:
                                     last_analyzed_joints = ik_result['joints'].copy()
                             
@@ -1165,22 +1140,21 @@ def execute_rapid_stream(data):
                             emit('rapid_point', point_data)
                             socketio.sleep(0.05)
                         else:
-                            # Error de cinemática directa
+
                             print(f"⚠ Error de cinemática directa en MoveC punto {j+1}/{len(trayectoria_cart)}")
-                            # Continuar con el siguiente punto en lugar de romper
+
                             continue
                     else:
-                        # Error de IK
+
                         print(f"⚠ Error IK en MoveC punto {j+1}/{len(trayectoria_cart)}: {ik_result.get('error', 'Unknown')}")
-                        # Continuar con el siguiente punto en lugar de romper
+
                         continue
                 
                 if not execution_error and ik_result and ik_result.get('success'):
                     current_joints = ik_result['joints']
                     current_position = to_position
                     current_quaternion = to_quaternion
-        
-        # Enviar señal de completado si no hubo errores críiticos
+
         if not execution_error:
             emit('rapid_complete', {
                 "success": True,
@@ -1192,7 +1166,6 @@ def execute_rapid_stream(data):
         import traceback
         traceback.print_exc()
         emit('rapid_error', {"message": f"Error al ejecutar código RAPID: {str(e)}"})
-
 
 def main():
     print("\n" + "="*60)
@@ -1231,7 +1204,6 @@ def main():
         use_reloader=True,
         allow_unsafe_werkzeug=True
     )
-
 
 if __name__ == "__main__":
     main()

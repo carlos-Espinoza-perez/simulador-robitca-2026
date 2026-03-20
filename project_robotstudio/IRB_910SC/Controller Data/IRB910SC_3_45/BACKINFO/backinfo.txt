@@ -1,0 +1,30 @@
+>>SYSTEM_ID:
+VIRTUAL_USE
+
+>>PRODUCTS_ID:
+RobotWare Version: 6.16.03.00
+
+  RobotWare Base
+  English
+  Move Pick and Place
+  Drive System IRB 120/140/260/360/910SC/1200/1400/1520/1600/1660ID IRC5 Compact
+  IRB 910SC-3/0.45
+
+>>HOME:
+All public files and directories
+
+>>SYSPAR:
+SYS.cfg
+PROC.cfg
+MMC.cfg
+EIO.cfg
+SIO.cfg
+MOC.cfg
+
+
+>>TASK1: (T_ROB1,,)
+SYSMOD\user.sys @ 
+PROGMOD\Module1.mod @ 
+
+
+>>EOF:
