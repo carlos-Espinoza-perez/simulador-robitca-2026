@@ -39,11 +39,12 @@ def obtener_robot_actual():
 robot = obtener_robot_actual()
 tabla_dh = robot["tabla_dh"]
 limites = robot["limites_articulares"]
+tipos_articulaciones = robot.get("tipos_articulaciones", ["R"] * robot["grados_libertad"])
 
 
 def calcular_estado(angulos):
     try:
-        T_final, transformaciones = cinematica_directa(angulos, tabla_dh)
+        T_final, transformaciones = cinematica_directa(angulos, tabla_dh, tipos_articulaciones)
         pose = obtener_posicion_efector(T_final)
         
         R = np.array(pose['matriz_rotacion'])
@@ -122,10 +123,11 @@ def seleccionar_robot():
         estado_robot["robot_actual"] = robot_id
         estado_robot["angulos"] = [0.0] * ROBOTS[robot_id]["grados_libertad"]
         
-        global robot, tabla_dh, limites
+        global robot, tabla_dh, limites, tipos_articulaciones
         robot = obtener_robot_actual()
         tabla_dh = robot["tabla_dh"]
         limites = robot["limites_articulares"]
+        tipos_articulaciones = robot.get("tipos_articulaciones", ["R"] * robot["grados_libertad"])
         
         estado = calcular_estado(estado_robot["angulos"])
         
@@ -161,7 +163,8 @@ def estado():
         analisis = analisis_completo(
             [np.rad2deg(a) for a in estado_robot["angulos"]], 
             tabla_dh, 
-            limites
+            limites,
+            tipos_articulaciones
         )
         estado_actual["analisis_singularidades"] = analisis
     except Exception as e:
@@ -185,7 +188,7 @@ def analizar_configuracion():
             joints_deg = [np.rad2deg(j) for j in joints_deg]
         
         try:
-            analisis = analisis_completo(joints_deg, tabla_dh, limites)
+            analisis = analisis_completo(joints_deg, tabla_dh, limites, tipos_articulaciones)
         except Exception as e:
             print(f"⚠ Error en análisis de singularidades: {e}")
             return jsonify({
@@ -370,7 +373,7 @@ def execute_rapid():
                     movement_data['quaternion'] = quaternion
                     
                     # Resolver cinemática inversa
-                    ik_result = solve_ik_from_robtarget(position, quaternion, limites, from_robotstudio=True)
+                    ik_result = solve_ik_from_robtarget(position, quaternion, limites, from_robotstudio=True, robot_id=estado_robot["robot_actual"])
                     
                     if ik_result['success']:
                         movement_data['joints'] = ik_result['joints']
@@ -399,7 +402,7 @@ def execute_rapid():
                     movement_data['quaternion'] = quaternion
                     
                     # Resolver cinemática inversa
-                    ik_result = solve_ik_from_robtarget(position, quaternion, limites, from_robotstudio=True)
+                    ik_result = solve_ik_from_robtarget(position, quaternion, limites, from_robotstudio=True, robot_id=estado_robot["robot_actual"])
                     
                     if ik_result['success']:
                         movement_data['joints'] = ik_result['joints']
@@ -533,7 +536,7 @@ def interpolate_rapid():
                     target_quaternion = cart_data['quaternion']
                     
                     # Resolver cinemática inversa
-                    ik_result = solve_ik_from_robtarget(target_position, target_quaternion, limites, from_robotstudio=True)
+                    ik_result = solve_ik_from_robtarget(target_position, target_quaternion, limites, from_robotstudio=True, robot_id=estado_robot["robot_actual"])
                     
                     if ik_result['success']:
                         target_joints = ik_result['joints']
@@ -590,7 +593,7 @@ def interpolate_rapid():
                     
                     # Resolver IK para cada punto
                     for j, pose in enumerate(trayectoria_cart):
-                        ik_result = solve_ik_from_robtarget(pose['position'], pose['quaternion'], limites, from_robotstudio=True)
+                        ik_result = solve_ik_from_robtarget(pose['position'], pose['quaternion'], limites, from_robotstudio=True, robot_id=estado_robot["robot_actual"])
                         
                         if ik_result['success']:
                             estado = calcular_estado(ik_result['joints'])
@@ -632,7 +635,7 @@ def interpolate_rapid():
                 
                 # Resolver IK para cada punto
                 for j, pose in enumerate(trayectoria_cart):
-                    ik_result = solve_ik_from_robtarget(pose['position'], pose['quaternion'], limites, from_robotstudio=True)
+                    ik_result = solve_ik_from_robtarget(pose['position'], pose['quaternion'], limites, from_robotstudio=True, robot_id=estado_robot["robot_actual"])
                     
                     if ik_result['success']:
                         estado = calcular_estado(ik_result['joints'])
@@ -777,8 +780,9 @@ def execute_rapid_stream(data):
         
         movements = parsed.get('movements', [])
         
-        # Estado actual
-        current_joints = estado_robot["angulos"].copy()
+        # Estado actual — recortar a los GDL reales del robot
+        num_gdl = len(limites)  # GDL reales del robot activo
+        current_joints = estado_robot["angulos"][:num_gdl].copy()
         current_estado = calcular_estado(current_joints)
         current_position = [
             current_estado['posicion']['x'],
@@ -803,7 +807,7 @@ def execute_rapid_stream(data):
             # Procesar según tipo de movimiento
             if movement['type'] in ['MoveAbsJ', 'MoveJ']:
                 if 'joints' in movement:
-                    target_joints = movement['joints']
+                    target_joints = movement['joints'][:num_gdl]  # Recortar RAPID 6-GDL → GDL reales
                     dist = 300.0  # Estimación base
                     estado_target = calcular_estado(target_joints)
                     if estado_target.get('success'):
@@ -844,7 +848,7 @@ def execute_rapid_stream(data):
                             
                             if should_analyze:
                                 try:
-                                    analisis = analisis_completo(joints, tabla_dh, limites)
+                                    analisis = analisis_completo(joints, tabla_dh, limites, tipos_articulaciones)
                                     last_analyzed_joints = joints.copy()
                                     # Emitir advertencia si hay singularidad
                                     if analisis and analisis['estado_general'] in ['singular', 'advertencia']:
@@ -857,6 +861,9 @@ def execute_rapid_stream(data):
                                 except Exception as e:
                                     print(f"⚠ Error en análisis de singularidades: {e}")
                                     # Continuar sin análisis
+                            else:
+                                if is_final_point:
+                                    last_analyzed_joints = joints.copy()
                             
                             point_count += 1
                             point_data = {
@@ -901,7 +908,7 @@ def execute_rapid_stream(data):
                     dist = float(np.linalg.norm(np.array(current_position) - np.array(target_position)))
                     num_pasos = calcular_num_pasos_por_velocidad(movement.get('speed', 'v1000'), dist)
                     
-                    ik_result = solve_ik_from_robtarget(target_position, target_quaternion, limites, from_robotstudio=True)
+                    ik_result = solve_ik_from_robtarget(target_position, target_quaternion, limites, from_robotstudio=True, robot_id=estado_robot["robot_actual"])
                     
                     
                     if ik_result['success']:
@@ -934,7 +941,7 @@ def execute_rapid_stream(data):
                                 
                                 if should_analyze:
                                     try:
-                                        analisis = analisis_completo(joints, tabla_dh, limites)
+                                        analisis = analisis_completo(joints, tabla_dh, limites, tipos_articulaciones)
                                         last_analyzed_joints = joints.copy()
                                         if analisis and analisis['estado_general'] in ['singular', 'advertencia']:
                                             singularidades_detectadas = analisis['singularidades']['singularidades']
@@ -946,6 +953,9 @@ def execute_rapid_stream(data):
                                     except Exception as e:
                                         print(f"⚠ Error en análisis de singularidades: {e}")
                                         # Continuar sin análisis
+                                else:
+                                    if is_final_point:
+                                        last_analyzed_joints = joints.copy()
                                 
                                 point_count += 1
                                 point_data = {
@@ -1004,7 +1014,7 @@ def execute_rapid_stream(data):
                             emit('rapid_error', {"message": "Ejecución detenida por el usuario", "type": "warning"})
                             break
                         
-                        ik_result = solve_ik_from_robtarget(pose['position'], pose['quaternion'], limites, from_robotstudio=True)
+                        ik_result = solve_ik_from_robtarget(pose['position'], pose['quaternion'], limites, from_robotstudio=True, robot_id=estado_robot["robot_actual"])
                         
                         if ik_result['success']:
                             estado = calcular_estado(ik_result['joints'])
@@ -1027,7 +1037,7 @@ def execute_rapid_stream(data):
                                 
                                 if should_analyze:
                                     try:
-                                        analisis = analisis_completo(ik_result['joints'], tabla_dh, limites)
+                                        analisis = analisis_completo(ik_result['joints'], tabla_dh, limites, tipos_articulaciones)
                                         last_analyzed_joints = ik_result['joints'].copy()
                                         if analisis and analisis['estado_general'] in ['singular', 'advertencia']:
                                             singularidades_detectadas = analisis['singularidades']['singularidades']
@@ -1039,6 +1049,9 @@ def execute_rapid_stream(data):
                                     except Exception as e:
                                         print(f"⚠ Error en análisis de singularidades: {e}")
                                         # Continuar sin análisis
+                                else:
+                                    if is_final_point:
+                                        last_analyzed_joints = ik_result['joints'].copy()
                                 
                                 point_count += 1
                                 point_data = {
@@ -1095,7 +1108,7 @@ def execute_rapid_stream(data):
                         emit('rapid_error', {"message": "Ejecución detenida por el usuario", "type": "warning"})
                         break
                     
-                    ik_result = solve_ik_from_robtarget(pose['position'], pose['quaternion'], limites, from_robotstudio=True)
+                    ik_result = solve_ik_from_robtarget(pose['position'], pose['quaternion'], limites, from_robotstudio=True, robot_id=estado_robot["robot_actual"])
                     
                     if ik_result['success']:
                         estado = calcular_estado(ik_result['joints'])
@@ -1118,7 +1131,7 @@ def execute_rapid_stream(data):
                             
                             if should_analyze:
                                 try:
-                                    analisis = analisis_completo(ik_result['joints'], tabla_dh, limites)
+                                    analisis = analisis_completo(ik_result['joints'], tabla_dh, limites, tipos_articulaciones)
                                     last_analyzed_joints = ik_result['joints'].copy()
                                     if analisis and analisis['estado_general'] in ['singular', 'advertencia']:
                                         singularidades_detectadas = analisis['singularidades']['singularidades']

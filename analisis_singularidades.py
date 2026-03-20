@@ -6,31 +6,33 @@ from typing import Dict, List, Tuple
 from cinematica_directa import cinematica_directa
 
 
-def calcular_jacobiano(joints_deg: List[float], tabla_dh: List[List[float]]) -> np.ndarray:
+def calcular_jacobiano(joints_deg: List[float], tabla_dh: List[List[float]], tipos_articulaciones: List[str] = None) -> np.ndarray:
     """
     Calcula el Jacobiano geométrico del robot
     
     Args:
-        joints_deg: Ángulos de las articulaciones en grados
+        joints_deg: Ángulos de las articulaciones en grados (o param desplazamiento en mm si es prismática)
         tabla_dh: Tabla de parámetros DH
+        tipos_articulaciones: Lista de tipos ('R' o 'P')
         
     Returns:
-        Jacobiano 6x6 (velocidad lineal y angular)
+        Jacobiano 6xN (velocidad lineal y angular)
     """
+    num_joints = len(joints_deg)
+    if tipos_articulaciones is None:
+        tipos_articulaciones = ["R"] * num_joints
+        
     # Usar grados directamente en cinematica_directa (ella convierte a rad internamente)
-    T_final, transformaciones = cinematica_directa(joints_deg, tabla_dh)
-    
-    # Convertir ángulos a radianes para los ejes y posiciones relativos
-    joints_rad = [np.deg2rad(j) for j in joints_deg]
+    T_final, transformaciones = cinematica_directa(joints_deg, tabla_dh, tipos_articulaciones)
     
     # Posición del efector final
     p_n = T_final[:3, 3]
     
     # Inicializar Jacobiano
-    J = np.zeros((6, 6))
+    J = np.zeros((6, num_joints))
     
     # Para cada articulación
-    for i in range(6):
+    for i in range(num_joints):
         # Transformación hasta la articulación i
         if i == 0:
             T_i = np.eye(4)
@@ -45,24 +47,27 @@ def calcular_jacobiano(joints_deg: List[float], tabla_dh: List[List[float]]) -> 
         if z_norm > 1e-10:
             z_i = z_i / z_norm
         
-        # Posición de la articulación
         p_i = T_i[:3, 3]
         
-        # Jacobiano de velocidad lineal: z_i × (p_n - p_i)
-        J[:3, i] = np.cross(z_i, p_n - p_i)
-        
-        # Jacobiano de velocidad angular: z_i
-        J[3:, i] = z_i
-    
+        if tipos_articulaciones[i] == 'R':
+            # Jacobiano de velocidad lineal: z_i × (p_n - p_i)
+            J[:3, i] = np.cross(z_i, p_n - p_i)
+            # Jacobiano de velocidad angular: z_i
+            J[3:, i] = z_i
+        else:
+            # Prismática: velocidad lineal plana en el eje, angular 0
+            J[:3, i] = z_i
+            J[3:, i] = 0.0
+            
     # Verificar si hay valores inválidos
     if np.any(np.isnan(J)) or np.any(np.isinf(J)):
-        # Usar identidad como fallback seguro (sin imprimir para evitar spam)
-        J = np.eye(6)
+        # Usar forma correcta
+        J = np.zeros((6, num_joints))
     
     return J
 
 
-def analizar_singularidades(joints_deg: List[float], tabla_dh: List[List[float]]) -> Dict:
+def analizar_singularidades(joints_deg: List[float], tabla_dh: List[List[float]], tipos_articulaciones: List[str] = None) -> Dict:
     """
     Analiza las singularidades del robot en una configuración dada
     
@@ -73,8 +78,8 @@ def analizar_singularidades(joints_deg: List[float], tabla_dh: List[List[float]]
     Returns:
         Diccionario con análisis de singularidades
     """
-    # 66: J = calcular_jacobiano(joints_deg, tabla_dh)
-    J = calcular_jacobiano(joints_deg, tabla_dh)
+    J = calcular_jacobiano(joints_deg, tabla_dh, tipos_articulaciones)
+    num_joints = len(joints_deg)
     
     # Verificar si el Jacobiano es válido antes de continuar
     if np.any(np.isnan(J)) or np.any(np.isinf(J)):
@@ -88,7 +93,7 @@ def analizar_singularidades(joints_deg: List[float], tabla_dh: List[List[float]]
             "metricas": {
                 "determinante": 0.0,
                 "numero_condicion": 1.0,
-                "valores_singulares": [1.0] * 6,
+                "valores_singulares": [1.0] * min(6, num_joints),
                 "manipulabilidad": 1.0
             },
             "limites": {
@@ -97,9 +102,14 @@ def analizar_singularidades(joints_deg: List[float], tabla_dh: List[List[float]]
             }
         }
     
-    # Calcular determinante
+    # Calcular determinante si J es cuadrada (6x6), sino 0.0
     try:
-        det_J = np.linalg.det(J)
+        if J.shape[0] == J.shape[1]:
+            det_J = np.linalg.det(J)
+        else:
+            # Determinante de la pseudo-inversa o raiz de J*J.T para manipulabilidad
+            det_J = np.sqrt(np.linalg.det(J @ J.T))
+            
         if np.isnan(det_J) or np.isinf(det_J):
             det_J = 0.0
     except:
@@ -116,8 +126,7 @@ def analizar_singularidades(joints_deg: List[float], tabla_dh: List[List[float]]
             
     except (np.linalg.LinAlgError, ValueError):
         # Si SVD no converge o valores inválidos, usar valores por defecto seguros
-        # No imprimir para evitar spam en consola
-        s = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
+        s = np.array([1.0] * min(6, num_joints))
         cond_number = 1.0
     else:
         # Número de condición (ratio entre mayor y menor valor singular)
@@ -129,55 +138,49 @@ def analizar_singularidades(joints_deg: List[float], tabla_dh: List[List[float]]
     # Clasificar singularidades con umbrales refinados
     singularidades = []
     
-    # Singularidad de muñeca (J4, J5, J6 alineados)
-    # Ocurre cuando J5 ≈ 0° o ≈ 180°
-    j5 = joints_deg[4]
-    # Umbral reducido de 5° a 1° para mayor realismo y evitar falsos positivos en Home
-    if abs(j5) < 1.0 or abs(abs(j5) - 180) < 1.0:
-        singularidades.append({
-            "tipo": "Muñeca",
-            "descripcion": "J5 cerca de 0° o 180° - ejes J4 y J6 alineados",
-            "severidad": "alta",
-            "articulaciones": [4, 5, 6],
-            "recomendacion": "Evitar J5=0° o J5=180°"
-        })
-    elif abs(j5) < 3.0: # Advertencia leve
-        singularidades.append({
-            "tipo": "Cerca de Muñeca",
-            "descripcion": "J5 se aproxima a configuración singular",
-            "severidad": "baja",
-            "articulaciones": [4, 5, 6],
-            "recomendacion": "Aumentar ángulo de J5"
-        })
-    
-    # Singularidad de codo (brazo completamente extendido o retraído)
-    # Ocurre cuando el brazo está en sus límites mecánicos de extensión
-    # En el IRB 140, J3=0 es una posición estándar, no necesariamente singular
-    # La verdadera singularidad de codo ocurre en el límite de alcance
-    j3 = joints_deg[2]
-    # Reducimos sensibilidad: J3=0 es común, solo advertir si es extremo
-    # El IRB 140 tiene límites J3 [-52, 50]. 1e-3 det_J ya captura pérdida de movilidad.
-    if abs(j3 - 50) < 1 or abs(j3 + 52) < 1:
-        singularidades.append({
-            "tipo": "Límite de Codo",
-            "descripcion": "Brazo cerca de su máxima extensión/retracción",
-            "severidad": "media",
-            "articulaciones": [2, 3],
-            "recomendacion": "Mantener J3 alejado de los límites extremos"
-        })
-    
-    # Singularidad de hombro (brazo vertical)
-    # Ocurre cuando el brazo está directamente sobre la base (centro de la base)
-    j2 = joints_deg[1]
-    # J2=90 es vertical. Umbral de 5° a 2°
-    if abs(j2 - 90) < 2:
-        singularidades.append({
-            "tipo": "Hombro vertical",
-            "descripcion": "Brazo vertical sobre la base - pérdida de dirección",
-            "severidad": "baja",
-            "articulaciones": [1, 2],
-            "recomendacion": "Evitar J2=90°"
-        })
+    # Las reglas de singularidad (codo, muñeca, hombro) dependen directamente 
+    # de la estructura geométrica IRB 140 de 6 GDL.
+    if num_joints == 6:
+        # Singularidad de muñeca (J4, J5, J6 alineados)
+        j5 = joints_deg[4]
+        if abs(j5) < 1.0 or abs(abs(j5) - 180) < 1.0:
+            singularidades.append({
+                "tipo": "Muñeca",
+                "descripcion": "J5 cerca de 0° o 180° - ejes J4 y J6 alineados",
+                "severidad": "alta",
+                "articulaciones": [4, 5, 6],
+                "recomendacion": "Evitar J5=0° o J5=180°"
+            })
+        elif abs(j5) < 3.0: # Advertencia leve
+            singularidades.append({
+                "tipo": "Cerca de Muñeca",
+                "descripcion": "J5 se aproxima a configuración singular",
+                "severidad": "baja",
+                "articulaciones": [4, 5, 6],
+                "recomendacion": "Aumentar ángulo de J5"
+            })
+        
+        # Singularidad de codo
+        j3 = joints_deg[2]
+        if abs(j3 - 50) < 1 or abs(j3 + 52) < 1:
+            singularidades.append({
+                "tipo": "Límite de Codo",
+                "descripcion": "Brazo cerca de su máxima extensión/retracción",
+                "severidad": "media",
+                "articulaciones": [2, 3],
+                "recomendacion": "Mantener J3 alejado de los límites extremos"
+            })
+        
+        # Singularidad de hombro (brazo vertical)
+        j2 = joints_deg[1]
+        if abs(j2 - 90) < 2:
+            singularidades.append({
+                "tipo": "Hombro vertical",
+                "descripcion": "Brazo vertical sobre la base - pérdida de dirección",
+                "severidad": "baja",
+                "articulaciones": [1, 2],
+                "recomendacion": "Evitar J2=90°"
+            })
     
     # Determinar estado general con histéresis de seguridad
     if abs(det_J) < 1e-4: # Umbral de tolerancia reducido (más permisivo)
@@ -250,7 +253,7 @@ def verificar_limites_articulares(joints_deg: List[float], limites: List[List[fl
 
 
 def analisis_completo(joints_deg: List[float], tabla_dh: List[List[float]], 
-                      limites: List[List[float]]) -> Dict:
+                      limites: List[List[float]], tipos_articulaciones: List[str] = None) -> Dict:
     """
     Análisis completo de la configuración del robot
     
@@ -258,11 +261,12 @@ def analisis_completo(joints_deg: List[float], tabla_dh: List[List[float]],
         joints_deg: Ángulos en grados
         tabla_dh: Tabla DH
         limites: Límites articulares
+        tipos_articulaciones: Tipo de articulación
         
     Returns:
         Análisis completo
     """
-    singularidades = analizar_singularidades(joints_deg, tabla_dh)
+    singularidades = analizar_singularidades(joints_deg, tabla_dh, tipos_articulaciones)
     limites_check = verificar_limites_articulares(joints_deg, limites)
     
     # Determinar estado general

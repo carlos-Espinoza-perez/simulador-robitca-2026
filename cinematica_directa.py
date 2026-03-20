@@ -17,42 +17,77 @@ def matriz_dh(theta, d, a, alpha):
         [ 0,      0,      0,    1]
     ])
 
-def cinematica_directa(angulos, tabla_dh=None):
+def cinematica_directa(angulos, tabla_dh=None, tipos_articulaciones=None):
     """
-    Calcula la Cinemática Directa exacta del ABB IRB 140 usando parámetros DH.
-    El origen (0,0,0) es el centro real de la base del robot.
+    Calcula la Cinemática Directa general usando parámetros DH.
     
     Args:
-        angulos: Lista de 6 ángulos en grados [J1, J2, J3, J4, J5, J6]
+        angulos: Lista de N ángulos en grados (o desplazamientos en mm para prismáticas)
+        tabla_dh: Lista de parámetros DH [theta, d, a, alpha]
+        tipos_articulaciones: Lista de 'R' (rotacional) o 'P' (prismática)
     Returns:
-        T06: Matriz de transformación 4x4 final (Efector / TCP)
-        transforms: Lista de las 6 matrices intermedias (para debug o dibujar eslabones)
+        T_final: Matriz de transformación 4x4 final (Efector / TCP)
+        transforms: Lista de las N matrices intermedias
     """
-    # Convertir a radianes
-    q = np.radians(angulos)
+    if tabla_dh is None:
+        # Fallback a IRB 140 por compatibilidad con scripts viejos (ej. generar_workspace.py)
+        tabla_dh = [
+            [0, 352.0, 0.0, 0.0],
+            [0, 0.0, 360.0, 0.0],
+            [0, 0.0, 70.0, -90.0],
+            [0, 380.0, 0.0, 90.0],
+            [0, 0.0, 0.0, -90.0],
+            [0, 65.0, 0.0, 0.0]
+        ]
+        
+    num_joints = len(angulos)
+    if tipos_articulaciones is None:
+        tipos_articulaciones = ["R"] * num_joints
+        
+    transforms = []
+    T_current = np.eye(4)
     pi_2 = np.pi / 2.0
     
-    # --- PARÁMETROS DH OFICIALES DEL IRB 140 ---
-    # Valores: [theta, d (Z), a (X), alpha (Torsión X)]
-    # Nota: J2 tiene un offset de -90° para que coincida con el "Home" vertical de RobotStudio
-    
-    T1 = matriz_dh(q[0],          352.0,  70.0, -pi_2)
-    T2 = matriz_dh(q[1] - pi_2,     0.0, 360.0,   0.0)
-    T3 = matriz_dh(q[2],            0.0,   0.0, -pi_2)
-    T4 = matriz_dh(q[3],          380.0,   0.0,  pi_2)
-    T5 = matriz_dh(q[4],            0.0,   0.0, -pi_2)
-    T6 = matriz_dh(q[5],           65.0,   0.0,   0.0)
-    
-    # Multiplicación secuencial de la cadena cinemática (Acumulación de rotaciones y traslaciones)
-    T01 = T1
-    T02 = T01 @ T2
-    T03 = T02 @ T3
-    T04 = T03 @ T4
-    T05 = T04 @ T5
-    T06 = T05 @ T6  # Posición y orientación final del TCP
-    
-    # Retornamos la matriz final y el historial de transformaciones
-    return T06, [T01, T02, T03, T04, T05, T06]
+    for i in range(num_joints):
+        val = angulos[i]
+        dh = list(tabla_dh[i]) # [theta_base, d_base, a, alpha]
+        
+        tipo = tipos_articulaciones[i]
+        if tipo == "R":
+            # Articulación rotacional: sumamos el ángulo al theta base
+            # Convertir el valor que viene en "grados" a radianes y sumar
+            # Pero dh[0] está en grados en la tabla_dh de especificaciones_robot.py
+            theta = np.radians(dh[0] + val)
+            
+            # IRB 140 Legacy Support: Si no pasaron tabla_dh y i==1, a veces se restan 90 grados
+            # Para evitar complicar, confiamos en tabla_dh puramente, pero en IRB140 viejo:
+            # J2=q[1]-pi_2. No lo aplicamos globalmente si pasamos tabla_dh correcto.
+            
+            d = dh[1]
+        elif tipo == "P":
+            # Articulación prismática: sumamos el valor a d base
+            theta = np.radians(dh[0])
+            d = dh[1] + val
+        else:
+            theta = np.radians(dh[0])
+            d = dh[1]
+            
+        a = dh[2]
+        alpha = np.radians(dh[3])
+        
+        # IRB 140 Legacy Support hardcodeado solo si tabla_dh es el exacto por defecto
+        if num_joints == 6 and tabla_dh[0][1] == 352.0 and i == 0: alpha = -pi_2
+        if num_joints == 6 and tabla_dh[0][1] == 352.0 and i == 1: theta -= pi_2
+        if num_joints == 6 and tabla_dh[0][1] == 352.0 and i == 2: alpha = -pi_2; dh[2] = 0.0
+        if num_joints == 6 and tabla_dh[0][1] == 352.0 and i == 3: alpha = pi_2
+        if num_joints == 6 and tabla_dh[0][1] == 352.0 and i == 4: alpha = -pi_2
+        
+        T_i = matriz_dh(theta, d, a, alpha)
+        T_current = T_current @ T_i
+        transforms.append(T_current)
+        
+    T_final = transforms[-1] if transforms else np.eye(4)
+    return T_final, transforms
 
 
 def obtener_posicion_efector(T):

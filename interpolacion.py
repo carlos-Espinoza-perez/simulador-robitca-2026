@@ -13,8 +13,8 @@ def interpolar_joints(q_inicio: List[float], q_fin: List[float], num_pasos: int 
     Interpolación lineal en espacio de articulaciones
     
     Args:
-        q_inicio: Ángulos iniciales [q1, q2, q3, q4, q5, q6] en grados
-        q_fin: Ángulos finales [q1, q2, q3, q4, q5, q6] en grados
+        q_inicio: Ángulos iniciales (longitud según GDL del robot)
+        q_fin: Ángulos finales (longitud según GDL del robot)
         num_pasos: Número de puntos intermedios a generar
         
     Returns:
@@ -22,6 +22,11 @@ def interpolar_joints(q_inicio: List[float], q_fin: List[float], num_pasos: int 
     """
     q_inicio = np.array(q_inicio)
     q_fin = np.array(q_fin)
+    
+    # Normalizar longitudes: RAPID siempre envía 6 ejes aunque el robot tenga menos
+    min_len = min(len(q_inicio), len(q_fin))
+    q_inicio = q_inicio[:min_len]
+    q_fin = q_fin[:min_len]
     
     # Generar interpolación lineal
     trayectoria = []

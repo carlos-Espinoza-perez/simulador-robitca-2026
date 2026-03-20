@@ -260,14 +260,123 @@ def inverse_kinematics_irb140(position, quaternion):
         return None
 
 def validate_joint_limits(joints, limits):
-    for i, (angle, (min_lim, max_lim)) in enumerate(zip(joints, limits)):
+    min_len = min(len(joints), len(limits))
+    for i in range(min_len):
+        angle = joints[i]
+        min_lim, max_lim = limits[i]
         if angle < min_lim or angle > max_lim:
-            return False, f"J{i+1}: {angle:.2f}° fuera de límites [{min_lim}°, {max_lim}°]"
+            return False, f"J{i+1}: {angle:.2f} fuera de límites [{min_lim}, {max_lim}]"
     
     return True, "OK"
 
 
-def solve_ik_from_robtarget(position, quaternion, robot_limits, from_robotstudio=False):
+# ============================================================
+# IK Analítico para SCARA (ABB IRB 910SC) - 4 GDL
+# ============================================================
+
+def inverse_kinematics_scara(position, quaternion):
+    """
+    Cinemática Inversa Analítica para el ABB IRB 910SC (SCARA).
+    
+    Parámetros DH del SCARA:
+        J1 (R): d1=200mm, a1=250mm, α=0°
+        J2 (R): d2=0,     a2=200mm, α=180°
+        J3 (P): d3=q3,    a3=0,     α=0°
+        J4 (R): d4=0,     a4=0,     α=0°
+    
+    FK resultado:
+        x = a1*cos(q1) + a2*cos(q1+q2)
+        y = a1*sin(q1) + a2*sin(q1+q2)
+        z = d1 - q3  (α2=180° invierte eje Z para el prismatico)
+    
+    Args:
+        position: [x, y, z] en mm (coordenadas del TCP)
+        quaternion: [qw, qx, qy, qz] (orientación, se extrae rotación Z)
+    
+    Returns:
+        np.array([q1_deg, q2_deg, q3_mm, q4_deg]) o None si no hay solución
+    """
+    # Parámetros geométricos del SCARA
+    a1 = 250.0   # Longitud brazo 1 (mm)
+    a2 = 200.0   # Longitud brazo 2 (mm)
+    d1 = 200.0   # Altura base (mm)
+    d3 = 100.0   # Offset base de la columna Z en la tabla DH (mm)
+    
+    x, y, z = position[0], position[1], position[2]
+    
+    try:
+        # FK es: z = d1 - (d3 + q3)  (porque alpha2 es 180 grados, el eje Z se invierte)
+        # Despejando: q3 = d1 - d3 - z
+        q3 = d1 - d3 - z
+        
+        # q3 es el desplazamiento prismático que debe estar teóricamente entre 0 y 150mm
+        if q3 < -5.0 or q3 > 155.0:  # Margen de tolerancia  
+            max_z = d1 - d3  # El z más alto que puede alcanzar (cuando q3 = 0 -> 200-100 = 100mm)
+            min_z = d1 - d3 - 150.0 # El z más bajo (cuando q3 = max alcance 150 -> 200-100-150 = -50mm)
+            print(f"⚠️ SCARA IK: Altura Z={z:.2f}mm inalcanzable. Rango válido Z es [{min_z}, {max_z}]mm")
+            return None
+        
+        # ── J2 (Codo): Ley de cosenos ──
+        r_sq = x**2 + y**2
+        r = np.sqrt(r_sq)
+        
+        cos_q2 = (r_sq - a1**2 - a2**2) / (2 * a1 * a2)
+        
+        if abs(cos_q2) > 1.0 + 1e-6:
+            print(f"⚠️ SCARA IK: Alcance {r:.2f}mm fuera de rango [{abs(a1-a2):.0f}, {a1+a2:.0f}]mm")
+            return None
+        
+        cos_q2 = np.clip(cos_q2, -1.0, 1.0)
+        
+        # Elegir configuración "codo arriba" (elbow-up) por defecto
+        sin_q2 = -np.sqrt(1 - cos_q2**2)  # Negativo = codo derecho (más natural en SCARA)
+        q2 = np.arctan2(sin_q2, cos_q2)
+        
+        # ── J1 (Hombro): Geometría planar ──
+        k1 = a1 + a2 * cos_q2
+        k2 = a2 * sin_q2
+        q1 = np.arctan2(y, x) - np.arctan2(k2, k1)
+        
+        # ── J4 (Muñeca): Rotación Z del TCP ──
+        # Extraer la rotación total en Z del cuaternión
+        # RAPID quaternion: [qw, qx, qy, qz]
+        if quaternion is not None and len(quaternion) >= 4:
+            qw, qx, qy, qz = quaternion[0], quaternion[1], quaternion[2], quaternion[3]
+            # Para SCARA la orientación es puramente en Z
+            # φ_total = atan2(2*(qw*qz + qx*qy), 1 - 2*(qy² + qz²))
+            phi_total = np.arctan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy**2 + qz**2))
+        else:
+            phi_total = 0.0
+        
+        # La rotación Z total del TCP = q1 + q2 + q4
+        q4 = phi_total - q1 - q2
+        
+        # Convertir a grados (J3 se queda en mm)
+        q1_deg = np.degrees(q1)
+        q2_deg = np.degrees(q2)
+        q3_mm = q3  # Prismático: ya está en mm
+        q4_deg = np.degrees(q4)
+        
+        return np.array([q1_deg, q2_deg, q3_mm, q4_deg])
+        
+    except Exception as e:
+        print(f"❌ Error en IK SCARA: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+# ============================================================
+# Router principal de IK
+# ============================================================
+
+def solve_ik_from_robtarget(position, quaternion, robot_limits, from_robotstudio=False, robot_id="ABB_IRB_140"):
+    """
+    Resuelve IK para cualquier robot soportado.
+    Enruta al solver analítico correcto según robot_id.
+    """
+    
+    # ── Transformación de coordenadas ──
     if from_robotstudio:
         position_transformed, quaternion_transformed = transform_robotstudio_to_robot_rotated(
             position, quaternion
@@ -279,13 +388,54 @@ def solve_ik_from_robtarget(position, quaternion, robot_limits, from_robotstudio
     if quaternion_transformed is None:
         quaternion_transformed = quaternion
     
-    joints = inverse_kinematics_irb140(position_transformed, quaternion_transformed)
+    # ── Enrutar al solver correcto ──
+    if robot_id == "ABB_IRB_910SC":
+        return _solve_ik_scara(position_transformed, quaternion_transformed, robot_limits)
+    else:
+        return _solve_ik_irb140(position_transformed, quaternion_transformed, robot_limits)
+
+
+def _solve_ik_scara(position, quaternion, robot_limits):
+    """Wrapper IK para el ABB IRB 910SC (SCARA)."""
+    joints = inverse_kinematics_scara(position, quaternion)
     
     if joints is None:
-        # Calcular detalles del error para mensaje informativo
-        xc, yc, zc = position_transformed
+        x, y, z = position
+        a1, a2 = 250.0, 200.0
+        r = np.sqrt(x**2 + y**2)
         
-        # Parámetros DH del IRB 140
+        return {
+            "success": False,
+            "joints": None,
+            "message": "Objetivo fuera del alcance del SCARA",
+            "error_detail": f"⚠️ SCARA: Alcance={r:.1f}mm (máx={a1+a2}mm), Z={z:.1f}mm (rango=[-50, 100]mm)"
+        }
+    
+    valid, msg = validate_joint_limits(joints, robot_limits)
+    
+    if not valid:
+        return {
+            "success": False,
+            "joints": joints.tolist(),
+            "message": f"Solución SCARA fuera de límites: {msg}",
+            "error_detail": f"⚠️ Límites excedidos: {msg}"
+        }
+    
+    return {
+        "success": True,
+        "joints": joints.tolist(),
+        "message": "Solución SCARA encontrada",
+        "error_detail": None
+    }
+
+
+def _solve_ik_irb140(position, quaternion, robot_limits):
+    """Wrapper IK para el ABB IRB 140."""
+    joints = inverse_kinematics_irb140(position, quaternion)
+    
+    if joints is None:
+        xc, yc, zc = position
+        
         d1 = 352.0
         a1 = 70.0
         a2 = 360.0
